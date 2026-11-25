@@ -1,0 +1,4 @@
+# Copy to .dev.vars for `wrangler dev`.
+ADMIN_TOKEN=dev-token
+# Offline fake market so you can see the full loop without network access:
+MOCK_MARKET=true

@@ -1,0 +1,19 @@
+{
+  "name": "solsnyper-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --test-scheduled",
+    "deploy": "wrangler deploy",
+    "db:migrate:local": "wrangler d1 migrations apply solsnyper --local",
+    "db:migrate:remote": "wrangler d1 migrations apply solsnyper --remote",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20241112.0",
+    "typescript": "5.6.3",
+    "vitest": "2.1.5",
+    "wrangler": "3.90.0"
+  }
+}
