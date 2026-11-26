@@ -1,0 +1,11 @@
+# The dashboard lives in web/ and is a Next.js static export (output: "export"),
+# so Netlify must build there and publish the generated out/ folder.
+# Set NEXT_PUBLIC_API_URL in Netlify's environment variables to point at the
+# deployed Worker; leave it unset to show built-in demo data.
+[build]
+  base = "web"
+  command = "npm ci && npm run build"
+  publish = "out"
+
+[build.environment]
+  NODE_VERSION = "20"
