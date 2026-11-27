@@ -30,6 +30,11 @@ ENABLE_PUMPFUN = "true"
 ENABLE_GECKOTERMINAL = "true"
 # DexScreener: discovery feeds + price fallback for mints GeckoTerminal misses.
 ENABLE_DEXSCREENER = "true"
+# Netlify market relay (GeckoTerminal/DexScreener block Cloudflare IPs).
+# Kill switch: set ENABLE_RELAY = "false" to stop calling it (no Netlify usage).
+ENABLE_RELAY = "true"
+RELAY_URL = "https://solsniperr.netlify.app/api/market"
 
 # Secrets (not in this file):
 #   wrangler secret put ADMIN_TOKEN     # enables POST /api/run, /pause, /resume, /reset
+#   wrangler secret put RELAY_TOKEN     # must equal RELAY_TOKEN on the Netlify site

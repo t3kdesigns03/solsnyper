@@ -50,5 +50,8 @@ export interface Env {
   ENABLE_PUMPFUN?: string; // "false" to disable the unofficial pump.fun source
   ENABLE_GECKOTERMINAL?: string; // "false" to disable GeckoTerminal (primary price source)
   ENABLE_DEXSCREENER?: string; // "false" to disable DexScreener (discovery + price fallback)
+  ENABLE_RELAY?: string; // "false" = kill switch: stop calling the Netlify relay, go direct
+  RELAY_URL?: string; // Netlify market relay endpoint
+  RELAY_TOKEN?: string; // secret shared with the relay (x-relay-token)
   MOCK_MARKET?: string; // "true" = offline fake market for local testing only
 }

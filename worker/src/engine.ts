@@ -2,6 +2,7 @@ import { CONFIG, type Config } from "./config";
 import { discoverDexScreener, fetchSnapshots, fetchSolPrice } from "./sources/dexscreener";
 import { discoverGeckoTerminal, fetchGeckoSnapshots } from "./sources/geckoterminal";
 import { discoverPumpFun } from "./sources/pumpfun";
+import { callRelay } from "./sources/relay";
 import { planTick, type TickPlan } from "./strategy/decide";
 import type { DiscoveredMint, Env, MarketSnapshot, OpenPosition } from "./types";
 
@@ -12,25 +13,80 @@ export interface Sources {
   discover(env: Env): Promise<{ mints: DiscoveredMint[]; errors: string[] }>;
   snapshots(mints: string[], now: number, env?: Env): Promise<Map<string, MarketSnapshot>>;
   solPrice(now: number, env?: Env): Promise<number | null>;
+  /** Optional one-shot fetch of discovery + prices (used for the Netlify relay). */
+  market?(env: Env, held: string[], now: number): Promise<MarketData>;
+}
+
+export interface MarketData {
+  mints: DiscoveredMint[];
+  errors: string[];
+  snapshots: Map<string, MarketSnapshot>;
+  solPrice: number | null;
+}
+
+/** The plain path: discover, then price everything, then SOL. */
+async function fetchMarket(sources: Sources, env: Env, held: string[], now: number): Promise<MarketData> {
+  const disc = await sources.discover(env);
+  const errors = [...disc.errors];
+  let snapshots = new Map<string, MarketSnapshot>();
+  try {
+    snapshots = await sources.snapshots([...held, ...disc.mints.map((d) => d.mint)], now, env);
+  } catch (e) {
+    errors.push(`snapshots: ${String(e)}`);
+  }
+  return { mints: disc.mints, errors, snapshots, solPrice: await sources.solPrice(now, env) };
 }
 
 const on = (v: string | undefined) => v !== "false";
 const WSOL = "So11111111111111111111111111111111111111112";
 
+async function discoverDirect(env: Env, includePumpFun: boolean) {
+  const jobs: [string, () => Promise<DiscoveredMint[]>][] = [];
+  if (on(env.ENABLE_GECKOTERMINAL)) jobs.push(["geckoterminal", discoverGeckoTerminal]);
+  if (on(env.ENABLE_DEXSCREENER)) jobs.push(["dexscreener", discoverDexScreener]);
+  if (includePumpFun && on(env.ENABLE_PUMPFUN)) jobs.push(["pumpfun", discoverPumpFun]);
+  const res = await Promise.allSettled(jobs.map(([, fn]) => fn()));
+  const mints: DiscoveredMint[] = [];
+  const errors: string[] = [];
+  res.forEach((r, i) => {
+    if (r.status === "fulfilled") mints.push(...r.value);
+    else errors.push(`${jobs[i][0]}: ${String(r.reason)}`);
+  });
+  return { mints, errors };
+}
+
 export const liveSources: Sources = {
-  async discover(env) {
-    const jobs: [string, () => Promise<DiscoveredMint[]>][] = [];
-    if (on(env.ENABLE_GECKOTERMINAL)) jobs.push(["geckoterminal", discoverGeckoTerminal]);
-    if (on(env.ENABLE_DEXSCREENER)) jobs.push(["dexscreener", discoverDexScreener]);
-    if (on(env.ENABLE_PUMPFUN)) jobs.push(["pumpfun", discoverPumpFun]);
-    const res = await Promise.allSettled(jobs.map(([, fn]) => fn()));
-    const mints: DiscoveredMint[] = [];
+  discover: (env) => discoverDirect(env, true),
+
+  // Relay path: pump.fun direct (it works from Cloudflare), then ONE call to the
+  // Netlify relay for GeckoTerminal/DexScreener discovery + prices. If the relay
+  // is off, unconfigured or failing, fall back to direct calls.
+  async market(env, held, now) {
+    if (!on(env.ENABLE_RELAY) || !env.RELAY_URL || !env.RELAY_TOKEN) return fetchMarket(this, env, held, now);
     const errors: string[] = [];
-    res.forEach((r, i) => {
-      if (r.status === "fulfilled") mints.push(...r.value);
-      else errors.push(`${jobs[i][0]}: ${String(r.reason)}`);
-    });
-    return { mints, errors };
+    let pump: DiscoveredMint[] = [];
+    if (on(env.ENABLE_PUMPFUN)) {
+      try {
+        pump = await discoverPumpFun();
+      } catch (e) {
+        errors.push(`pumpfun: ${String(e)}`);
+      }
+    }
+    try {
+      const r = await callRelay(env.RELAY_URL, env.RELAY_TOKEN, [...held, ...pump.map((d) => d.mint)], {
+        dexscreener: on(env.ENABLE_DEXSCREENER),
+      });
+      return {
+        mints: [...pump, ...r.discovered],
+        errors: [...errors, ...r.errors.map((e) => `relay/${e}`)],
+        snapshots: new Map(r.snapshots.map((s) => [s.mint, s])),
+        solPrice: r.solPriceUsd,
+      };
+    } catch (e) {
+      errors.push(`relay: ${String(e)} (fell back to direct calls)`);
+      const direct = await fetchMarket({ ...this, discover: (en) => discoverDirect(en, false) }, env, held, now);
+      return { ...direct, mints: [...pump, ...direct.mints], errors: [...errors, ...direct.errors] };
+    }
   },
 
   // GeckoTerminal is the primary price source; DexScreener only fills in mints
@@ -106,15 +162,12 @@ export async function runTick(env: Env, now = Date.now(), sources: Sources = liv
   );
 
   // --- fetch market data
-  const disc = await sources.discover(env);
-  errors.push(...disc.errors);
-  let snapshots = new Map<string, MarketSnapshot>();
-  try {
-    snapshots = await sources.snapshots([...open.map((p) => p.mint), ...disc.mints.map((d) => d.mint)], now, env);
-  } catch (e) {
-    errors.push(`snapshots: ${String(e)}`);
-  }
-  const solPrice = (await sources.solPrice(now, env)) ?? wallet.sol_price_usd;
+  const held = open.map((p) => p.mint);
+  const market = sources.market ? await sources.market(env, held, now) : await fetchMarket(sources, env, held, now);
+  errors.push(...market.errors);
+  const disc = { mints: market.mints };
+  const snapshots = market.snapshots;
+  const solPrice = market.solPrice ?? wallet.sol_price_usd;
 
   // --- decide (pure)
   const plan = planTick({ now, cfg, cashUsd: wallet.cash_usd, open, discovered: disc.mints, snapshots, recentlyTraded });
