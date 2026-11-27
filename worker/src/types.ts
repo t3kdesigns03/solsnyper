@@ -34,12 +34,27 @@ export interface OpenPosition {
   entry_time: number;
   size_usd: number;
   quantity: number;
-  entry_fee_usd: number;
+  entry_fee_usd: number; // cash spent beyond size_usd on entry (the buy's network fee)
+  dex_id: string | null;
   entry_liquidity: number;
   current_price: number;
   current_liquidity: number | null;
   peak_price: number;
   missed_updates: number;
+}
+
+// An order decided on one tick and filled on a later one (CONFIG.costs.fillDelayTicks).
+export interface PendingOrder {
+  id: number;
+  side: "buy" | "sell";
+  mint: string;
+  symbol: string;
+  position_id: number | null; // sells only
+  signal_price: number; // observed price when the decision was made
+  signal_time: number;
+  reason: string; // buys: why it was bought; sells: "rule: reason"
+  score: number | null;
+  ticks_waited: number;
 }
 
 export interface Env {

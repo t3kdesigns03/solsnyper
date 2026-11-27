@@ -31,13 +31,19 @@ export function SummaryCards() {
         <Card label="Realized" value={signedUsd(s.realizedPnl)} sub={`${s.closedTrades} trades · ${(winRate * 100).toFixed(0)}% wins`} valueClass={pnlClass(s.realizedPnl)} />
         <Card label="Unrealized" value={signedUsd(s.unrealizedPnl)} sub={`${s.openPositions} open · ${usd(s.exposureUsd, 0)} in`} valueClass={pnlClass(s.unrealizedPnl)} />
         <Card label="Cash" value={usd(w.cash_usd)} sub={w.sol_price_usd ? `≈ ${w.cash_sol.toFixed(3)} SOL @ ${usd(w.sol_price_usd)}` : "SOL price pending"} />
-        <Card label="Fees paid" value={usd(s.totalFees)} sub="0.8% round trip (est.)" />
+        <Card
+          label="Trading costs"
+          value={usd(s.costs.totalUsd)}
+          sub={`DEX ${usd(s.costs.dexFeesUsd)} · gas ${usd(s.costs.networkFeesUsd)} · slippage ${usd(s.costs.slippageUsd)}`}
+          valueClass="text-amber-300"
+        />
       </div>
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500">
         <span>
           Last tick {ago(s.lastRun?.started_at)}
           {s.lastRun && ` · ${s.lastRun.candidates_seen} candidates · ${s.lastRun.buys} buys · ${s.lastRun.sells} sells · ${s.lastRun.duration_ms}ms`}
         </span>
+        {s.pendingOrders > 0 && <span className="text-violet-300">{s.pendingOrders} order{s.pendingOrders === 1 ? "" : "s"} waiting to fill</span>}
         <span>{s.scheduler?.paused ? "Scheduler PAUSED" : nextIn !== null ? `Next tick in ${nextIn}s` : ""}</span>
         {s.lastRun?.errors && <span className="text-amber-400">Source warnings: {s.lastRun.errors}</span>}
       </div>

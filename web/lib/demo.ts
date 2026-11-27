@@ -64,7 +64,9 @@ function build() {
     return {
       id: 90 - i, mint: mintFor(40 + i), symbol: SYMS[(i * 3 + 2) % SYMS.length], entry_price: entry, entry_time: exitT - 6 * 60_000, size_usd: 20,
       current_price: entry * move, peak_price: entry * Math.max(1, move) * 1.04, unrealized_pnl: 0, status: "closed",
-      exit_price: entry * move, exit_time: exitT, realized_pnl: 20 * move * 0.996 - 20.08, close_reason: exits[i % 5],
+      exit_price: entry * move, exit_time: exitT, realized_pnl: 20 * move * 0.984 - 20.1 - 0.1, close_reason: exits[i % 5],
+      dex_id: i % 2 ? "raydium" : "pumpswap", entry_signal_price: entry * 0.993, exit_signal_price: entry * move * 1.01,
+      entry_dex_fee_usd: 0.05, entry_network_fee_usd: 0.1, entry_slippage_usd: 0.11, exit_dex_fee_usd: 0.05 * move, exit_network_fee_usd: 0.1, exit_slippage_usd: 0.11 * move,
     };
   });
 
@@ -85,11 +87,26 @@ function build() {
   const summary: Summary = {
     simulated: true,
     wallet: { cash_sol: (start + realized - 60.24) / 235, cash_usd: start + realized - 60.24, equity_usd: start + realized + unreal, starting_equity: start, sol_price_usd: 235, updated_at: now - 12_000 },
-    realizedPnl: realized, closedTrades: closed.length, wins: closed.filter((p) => (p.realized_pnl ?? 0) > 0).length, totalFees: trades.reduce((a, t) => a + t.fees_usd, 0),
+    realizedPnl: realized, closedTrades: closed.length, wins: closed.filter((p) => (p.realized_pnl ?? 0) > 0).length, totalFees: 0,
+    costs: { dexFeesUsd: 0.9, networkFeesUsd: 1.8, slippageUsd: 2.05, totalUsd: 4.75 },
+    pendingOrders: 1,
+    costExamples: {
+      sizeUsd: 20, solPriceUsd: 200, legacyFlatUsd: 0.16,
+      rows: [
+        { label: "pump.fun curve, $25k", dexId: "pumpfun", liquidityUsd: 25_000, totalUsd: 0.857, pctOfSize: 0.0428, dexFeeUsd: 0.395, networkFeeUsd: 0.202, slippageUsd: 0.259 },
+        { label: "PumpSwap, $25k", dexId: "pumpswap", liquidityUsd: 25_000, totalUsd: 0.583, pctOfSize: 0.0291, dexFeeUsd: 0.119, networkFeeUsd: 0.202, slippageUsd: 0.261 },
+        { label: "Raydium, $25k", dexId: "raydium", liquidityUsd: 25_000, totalUsd: 0.563, pctOfSize: 0.0281, dexFeeUsd: 0.099, networkFeeUsd: 0.202, slippageUsd: 0.261 },
+        { label: "Raydium, $250k", dexId: "raydium", liquidityUsd: 250_000, totalUsd: 0.507, pctOfSize: 0.0253, dexFeeUsd: 0.099, networkFeeUsd: 0.202, slippageUsd: 0.205 },
+      ],
+    },
     openPositions: positions.length, unrealizedPnl: unreal, exposureUsd: 60,
     lastRun: { started_at: now - 12_000, duration_ms: 840, candidates_seen: candidates.length, buys: 0, sells: 1, errors: "pumpfun: 403 Forbidden from frontend-api-v3.pump.fun" },
     scheduler: { nextAlarm: now + 33_000, paused: false },
-    config: { tickIntervalMs: 45_000, wallet: { buySizeUsd: 20 }, filters: { minLiquidityUsd: 20_000, maxAgeMinutes: 60 }, exits: { hardStopPct: -0.08, takeProfitPct: 0.25, maxHoldMinutes: 12 } },
+    config: {
+      tickIntervalMs: 45_000, wallet: { buySizeUsd: 20, maxOpenPositions: 10, maxBuysPerTick: 3 },
+      costs: { dexFeePct: { pumpfun: 0.01, pumpswap: 0.003, raydium: 0.0025, meteora: 0.003, orca: 0.003, default: 0.003 }, networkFeeSol: 0.000005, priorityFeeSol: 0.0005, fallbackSolPriceUsd: 150, extraSlippagePct: 0.005, fillDelayTicks: 1 },
+      filters: { minLiquidityUsd: 20_000, maxAgeMinutes: 60 }, exits: { hardStopPct: -0.08, takeProfitPct: 0.25, maxHoldMinutes: 12 },
+    },
   };
   equity[equity.length - 1].equity = summary.wallet.equity_usd;
 

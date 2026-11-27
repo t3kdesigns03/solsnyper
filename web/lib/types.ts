@@ -13,13 +13,45 @@ export interface Summary {
   realizedPnl: number;
   closedTrades: number;
   wins: number;
-  totalFees: number;
+  totalFees: number; // all trading costs (DEX fees + network fees + slippage)
+  costs: CostTotals;
+  pendingOrders: number;
+  costExamples: CostExamples;
   openPositions: number;
   unrealizedPnl: number;
   exposureUsd: number;
   lastRun: { started_at: number; duration_ms: number; candidates_seen: number; buys: number; sells: number; errors: string | null } | null;
   scheduler: { nextAlarm: number | null; paused: boolean } | null;
-  config: { tickIntervalMs: number; wallet: { buySizeUsd: number }; filters: { minLiquidityUsd: number; maxAgeMinutes: number }; exits: { hardStopPct: number; takeProfitPct: number; maxHoldMinutes: number } };
+  config: {
+    tickIntervalMs: number;
+    wallet: { buySizeUsd: number; maxOpenPositions: number; maxBuysPerTick: number };
+    costs: CostSettings;
+    filters: { minLiquidityUsd: number; maxAgeMinutes: number };
+    exits: { hardStopPct: number; takeProfitPct: number; maxHoldMinutes: number };
+  };
+}
+
+export interface CostTotals {
+  dexFeesUsd: number;
+  networkFeesUsd: number;
+  slippageUsd: number;
+  totalUsd: number;
+}
+
+export interface CostSettings {
+  dexFeePct: Record<string, number>;
+  networkFeeSol: number;
+  priorityFeeSol: number;
+  fallbackSolPriceUsd: number;
+  extraSlippagePct: number;
+  fillDelayTicks: number;
+}
+
+export interface CostExamples {
+  sizeUsd: number;
+  solPriceUsd: number;
+  legacyFlatUsd: number;
+  rows: { label: string; dexId: string; liquidityUsd: number; totalUsd: number; pctOfSize: number; dexFeeUsd: number; networkFeeUsd: number; slippageUsd: number }[];
 }
 
 export interface Candidate {
@@ -52,6 +84,16 @@ export interface Position {
   exit_time: number | null;
   realized_pnl: number | null;
   close_reason: string | null;
+  // cost breakdown (0 / null for rows from before the cost model)
+  dex_id?: string | null;
+  entry_signal_price?: number | null;
+  exit_signal_price?: number | null;
+  entry_dex_fee_usd?: number;
+  entry_network_fee_usd?: number;
+  entry_slippage_usd?: number;
+  exit_dex_fee_usd?: number;
+  exit_network_fee_usd?: number;
+  exit_slippage_usd?: number;
 }
 
 export interface Trade {
@@ -70,7 +112,7 @@ export interface Trade {
 export interface Decision {
   id: number;
   mint: string;
-  action: "buy" | "reject" | "skip" | "sell" | "error";
+  action: "buy" | "reject" | "skip" | "sell" | "order" | "cancel" | "error";
   reason: string;
   score: number | null;
   timestamp: number;

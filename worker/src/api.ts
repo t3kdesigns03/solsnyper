@@ -1,4 +1,5 @@
 import { CONFIG } from "./config";
+import { LEGACY_ROUND_TRIP_PCT, roundTripCost } from "./strategy/broker";
 import { schedulerStub } from "./stub";
 import type { Env } from "./types";
 
@@ -6,6 +7,7 @@ import type { Env } from "./types";
 //   GET  /api/summary      wallet, PnL, counts, scheduler + last run
 //   GET  /api/candidates   latest candidate feed with pass/fail reasons
 //   GET  /api/positions    open positions
+//   GET  /api/orders       pending orders (decided, not yet filled)
 //   GET  /api/trades       closed trades (sell legs) + buys
 //   GET  /api/decisions    decision log
 //   GET  /api/equity       equity curve (downsampled)
@@ -40,7 +42,11 @@ export async function handleApi(req: Request, env: Env): Promise<Response> {
           const realized = await db
             .prepare("SELECT COALESCE(SUM(pnl_usd),0) AS pnl, COUNT(*) AS n, SUM(CASE WHEN pnl_usd>0 THEN 1 ELSE 0 END) AS wins, COALESCE(SUM(fees_usd),0) AS sell_fees FROM trades WHERE side='sell'")
             .first<{ pnl: number; n: number; wins: number; sell_fees: number }>();
-          const fees = await db.prepare("SELECT COALESCE(SUM(fees_usd),0) AS f FROM trades").first<{ f: number }>();
+          const c = await db
+            .prepare("SELECT COALESCE(SUM(dex_fee_usd),0) AS dex, COALESCE(SUM(network_fee_usd),0) AS net, COALESCE(SUM(slippage_usd),0) AS slip FROM trades")
+            .first<{ dex: number; net: number; slip: number }>();
+          const costs = { dexFeesUsd: c?.dex ?? 0, networkFeesUsd: c?.net ?? 0, slippageUsd: c?.slip ?? 0, totalUsd: (c?.dex ?? 0) + (c?.net ?? 0) + (c?.slip ?? 0) };
+          const pendingOrders = (await db.prepare("SELECT COUNT(*) AS n FROM pending_orders").first<{ n: number }>())?.n ?? 0;
           const openAgg = await db
             .prepare("SELECT COUNT(*) AS n, COALESCE(SUM(unrealized_pnl),0) AS u, COALESCE(SUM(size_usd),0) AS exposure FROM positions WHERE status='open'")
             .first<{ n: number; u: number; exposure: number }>();
@@ -57,7 +63,10 @@ export async function handleApi(req: Request, env: Env): Promise<Response> {
             realizedPnl: realized?.pnl ?? 0,
             closedTrades: realized?.n ?? 0,
             wins: realized?.wins ?? 0,
-            totalFees: fees?.f ?? 0,
+            totalFees: costs.totalUsd,
+            costs,
+            pendingOrders,
+            costExamples: costExamples((wallet as { sol_price_usd?: number } | null)?.sol_price_usd || CONFIG.costs.fallbackSolPriceUsd),
             openPositions: openAgg?.n ?? 0,
             unrealizedPnl: openAgg?.u ?? 0,
             exposureUsd: openAgg?.exposure ?? 0,
@@ -71,6 +80,9 @@ export async function handleApi(req: Request, env: Env): Promise<Response> {
           return json(
             (await db.prepare("SELECT * FROM candidates ORDER BY last_seen DESC, flagged DESC, score DESC LIMIT ?").bind(limit).all()).results,
           );
+
+        case "/api/orders":
+          return json((await db.prepare("SELECT * FROM pending_orders ORDER BY id DESC").all()).results);
 
         case "/api/positions":
           return json((await db.prepare("SELECT * FROM positions WHERE status='open' ORDER BY entry_time DESC").all()).results);
@@ -126,6 +138,7 @@ export async function handleApi(req: Request, env: Env): Promise<Response> {
             db.prepare("DELETE FROM decisions"),
             db.prepare("DELETE FROM equity_snapshots"),
             db.prepare("DELETE FROM runs"),
+            db.prepare("DELETE FROM pending_orders"),
             db.prepare("UPDATE wallet SET cash_usd=?, cash_sol=0, equity_usd=?, starting_equity=?, updated_at=? WHERE id=1").bind(start, start, start, Date.now()),
           ]);
           return json({ reset: true, startingEquity: start });
@@ -137,4 +150,25 @@ export async function handleApi(req: Request, env: Env): Promise<Response> {
   } catch (e) {
     return json({ error: String(e) }, 500);
   }
+}
+
+/**
+ * What a buy + immediate sell at an unchanged price costs with the current
+ * settings, for a few typical pools. Shown on the dashboard so the cost of a
+ * round trip is visible before tuning take-profit / stop levels.
+ */
+function costExamples(solPriceUsd: number) {
+  const size = CONFIG.wallet.buySizeUsd;
+  const pools: [string, string, number][] = [
+    ["pump.fun curve, $25k", "pumpfun", 25_000],
+    ["PumpSwap, $25k", "pumpswap", 25_000],
+    ["Raydium, $25k", "raydium", 25_000],
+    ["Raydium, $250k", "raydium", 250_000],
+  ];
+  return {
+    sizeUsd: size,
+    solPriceUsd,
+    legacyFlatUsd: size * LEGACY_ROUND_TRIP_PCT,
+    rows: pools.map(([label, dexId, liquidityUsd]) => ({ label, dexId, liquidityUsd, ...roundTripCost(size, { price: 1, liquidityUsd, dexId, solPriceUsd }, CONFIG.costs) })),
+  };
 }

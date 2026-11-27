@@ -4,7 +4,7 @@ import { discoverGeckoTerminal, fetchGeckoSnapshots } from "./sources/geckotermi
 import { discoverPumpFun } from "./sources/pumpfun";
 import { callRelay } from "./sources/relay";
 import { planTick, type TickPlan } from "./strategy/decide";
-import type { DiscoveredMint, Env, MarketSnapshot, OpenPosition } from "./types";
+import type { DiscoveredMint, Env, MarketSnapshot, OpenPosition, PendingOrder } from "./types";
 
 // One tick = discover -> fetch prices -> planTick (pure) -> persist.
 // Sources are injectable so tests and local runs can use fixtures.
@@ -142,8 +142,9 @@ export async function runTick(env: Env, now = Date.now(), sources: Sources = liv
 
   // --- load state
   const wallet = await db.prepare("SELECT cash_usd, sol_price_usd FROM wallet WHERE id = 1").first<{ cash_usd: number; sol_price_usd: number }>();
-  if (!wallet) throw new Error("wallet row missing: run the D1 migration");
+  if (!wallet) throw new Error("wallet row missing: run the D1 migrations");
   const open = (await db.prepare("SELECT * FROM positions WHERE status = 'open'").all<OpenPosition>()).results;
+  const pending = (await db.prepare("SELECT * FROM pending_orders ORDER BY id").all<PendingOrder>()).results;
   const cooldownStart = now - cfg.filters.reentryCooldownMinutes * 60_000;
   const recent = (
     await db
@@ -161,16 +162,18 @@ export async function runTick(env: Env, now = Date.now(), sources: Sources = liv
     ).results.map((r) => [r.mint, r.reject_reason]),
   );
 
-  // --- fetch market data
-  const held = open.map((p) => p.mint);
+  // --- fetch market data (mints with a pending buy count as held, so they get priced)
+  const held = [...open.map((p) => p.mint), ...pending.filter((o) => o.side === "buy").map((o) => o.mint)];
   const market = sources.market ? await sources.market(env, held, now) : await fetchMarket(sources, env, held, now);
   errors.push(...market.errors);
-  const disc = { mints: market.mints };
-  const snapshots = market.snapshots;
+  // SOL price: live, else last stored; planTick falls back to CONFIG if both are 0.
   const solPrice = market.solPrice ?? wallet.sol_price_usd;
 
   // --- decide (pure)
-  const plan = planTick({ now, cfg, cashUsd: wallet.cash_usd, open, discovered: disc.mints, snapshots, recentlyTraded });
+  const plan = planTick({
+    now, cfg, cashUsd: wallet.cash_usd, solPriceUsd: solPrice, open, pending,
+    discovered: market.mints, snapshots: market.snapshots, recentlyTraded,
+  });
 
   // --- persist
   await db.batch(buildWrites(db, plan, now, solPrice, prevReasons, cfg, errors));
@@ -197,16 +200,27 @@ function buildWrites(
 ): D1PreparedStatement[] {
   const w: D1PreparedStatement[] = [];
 
+  // entry_price / exit_price are FILL prices (after slippage); *_signal_price is
+  // what we observed when the decision was made. fees_usd = DEX + network fees.
   for (const s of plan.sells) {
+    const f = s.fill;
+    const reason = `${s.rule}: ${s.reason}`;
     w.push(
       db
         .prepare(
-          `UPDATE positions SET status='closed', current_price=?, exit_price=?, exit_time=?, realized_pnl=?, unrealized_pnl=0, close_reason=?, last_update=? WHERE id=?`,
+          `UPDATE positions SET status='closed', current_price=?, exit_price=?, exit_signal_price=?, exit_time=?, realized_pnl=?, unrealized_pnl=0,
+             exit_dex_fee_usd=?, exit_network_fee_usd=?, exit_slippage_usd=?, close_reason=?, last_update=? WHERE id=?`,
         )
-        .bind(s.price, s.price, now, s.pnlUsd, `${s.rule}: ${s.reason}`, now, s.pos.id),
+        .bind(f.signalPrice, f.fillPrice, s.signalPrice, now, f.pnlUsd, f.costs.dexFeeUsd, f.costs.networkFeeUsd, f.costs.slippageUsd, reason, now, s.pos.id),
       db
-        .prepare(`INSERT INTO trades (position_id, mint, symbol, side, price, size_usd, fees_usd, pnl_usd, reason, timestamp) VALUES (?,?,?,'sell',?,?,?,?,?,?)`)
-        .bind(s.pos.id, s.pos.mint, s.pos.symbol, s.price, s.cashIn + s.feeUsd, s.feeUsd, s.pnlUsd, `${s.rule}: ${s.reason}`, now),
+        .prepare(
+          `INSERT INTO trades (position_id, mint, symbol, side, price, signal_price, size_usd, fees_usd, dex_fee_usd, network_fee_usd, slippage_usd, pnl_usd, reason, timestamp)
+           VALUES (?,?,?,'sell',?,?,?,?,?,?,?,?,?,?)`,
+        )
+        .bind(
+          s.pos.id, s.pos.mint, s.pos.symbol, f.fillPrice, s.signalPrice, f.receivedUsd, f.costs.dexFeeUsd + f.costs.networkFeeUsd,
+          f.costs.dexFeeUsd, f.costs.networkFeeUsd, f.costs.slippageUsd, f.pnlUsd, reason, now,
+        ),
     );
   }
 
@@ -218,21 +232,43 @@ function buildWrites(
     );
   }
 
+  const size = cfg.wallet.buySizeUsd;
   for (const b of plan.buys) {
     const s = b.snap;
+    const f = b.fill;
+    // entry_fee_usd = cash spent beyond size_usd (the network fee). The DEX fee
+    // and slippage are already "inside" the smaller token quantity.
     w.push(
       db
         .prepare(
-          `INSERT INTO positions (mint, symbol, pair_address, entry_price, entry_time, size_usd, quantity, entry_fee_usd, entry_liquidity, current_price, current_liquidity, peak_price, unrealized_pnl, last_update, status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open')`,
+          `INSERT INTO positions (mint, symbol, pair_address, dex_id, entry_price, entry_signal_price, entry_time, size_usd, quantity, entry_fee_usd,
+             entry_dex_fee_usd, entry_network_fee_usd, entry_slippage_usd, entry_liquidity, current_price, current_liquidity, peak_price, unrealized_pnl, last_update, status)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open')`,
         )
-        .bind(s.mint, s.symbol, s.pairAddress, s.priceUsd, now, cfg.wallet.buySizeUsd, b.quantity, b.feeUsd, s.liquidityUsd, s.priceUsd, s.liquidityUsd, s.priceUsd, -b.feeUsd * 2, now),
+        .bind(
+          s.mint, s.symbol, s.pairAddress, s.dexId, f.fillPrice, b.signalPrice, now, size, f.quantity, f.cashOut - size,
+          f.costs.dexFeeUsd, f.costs.networkFeeUsd, f.costs.slippageUsd, s.liquidityUsd, s.priceUsd, s.liquidityUsd, f.fillPrice, -f.costs.totalUsd, now,
+        ),
       db
         .prepare(
-          `INSERT INTO trades (position_id, mint, symbol, side, price, size_usd, fees_usd, pnl_usd, reason, timestamp)
-           VALUES ((SELECT MAX(id) FROM positions WHERE mint=? AND status='open'),?,?,'buy',?,?,?,0,?,?)`,
+          `INSERT INTO trades (position_id, mint, symbol, side, price, signal_price, size_usd, fees_usd, dex_fee_usd, network_fee_usd, slippage_usd, pnl_usd, reason, timestamp)
+           VALUES ((SELECT MAX(id) FROM positions WHERE mint=? AND status='open'),?,?,'buy',?,?,?,?,?,?,?,0,?,?)`,
         )
-        .bind(s.mint, s.mint, s.symbol, s.priceUsd, cfg.wallet.buySizeUsd, b.feeUsd, `score ${b.score}`, now),
+        .bind(
+          s.mint, s.mint, s.symbol, f.fillPrice, b.signalPrice, size, f.costs.dexFeeUsd + f.costs.networkFeeUsd,
+          f.costs.dexFeeUsd, f.costs.networkFeeUsd, f.costs.slippageUsd, b.reason, now,
+        ),
+    );
+  }
+
+  // Pending orders: drop filled/cancelled, bump waiting, add new.
+  for (const o of plan.closedOrders) w.push(db.prepare(`DELETE FROM pending_orders WHERE id=?`).bind(o.id));
+  for (const o of plan.waitingOrders) w.push(db.prepare(`UPDATE pending_orders SET ticks_waited=? WHERE id=?`).bind(o.ticksWaited, o.id));
+  for (const o of plan.newOrders) {
+    w.push(
+      db
+        .prepare(`INSERT INTO pending_orders (side, mint, symbol, position_id, signal_price, signal_time, reason, score, ticks_waited) VALUES (?,?,?,?,?,?,?,?,0)`)
+        .bind(o.side, o.mint, o.symbol, o.position_id, o.signal_price, o.signal_time, o.reason, o.score),
     );
   }
 

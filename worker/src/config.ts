@@ -1,37 +1,68 @@
-// All strategy knobs live here. Change a number, redeploy, done.
+// All strategy knobs live here. Change a number, `npm run deploy`, done.
 // Every value is deterministic: same inputs + same config => same decisions.
+// Percentages are fractions: 0.01 = 1%. Money is USD unless the name says SOL.
+// The README "Tuning" section explains each knob and what moving it does.
 
 export const CONFIG = {
-  tickIntervalMs: 45_000,
+  tickIntervalMs: 45_000, // how often the bot looks at the market (Durable Object alarm)
 
   wallet: {
-    startingEquityUsd: 1000,
-    buySizeUsd: 20,
-    maxOpenPositions: 10,
-    maxBuysPerTick: 3,
+    startingEquityUsd: 1000, // paper bankroll after /api/reset
+    buySizeUsd: 20, // USD sent into each buy swap (network fee is extra)
+    maxOpenPositions: 10, // never hold more than this many tokens at once
+    maxBuysPerTick: 3, // at most this many new buys per tick (best scores first)
   },
 
-  fees: {
-    // 0.8% round trip, charged as 0.4% on the buy and 0.4% on the sell.
-    roundTripPct: 0.008,
+  // ── Trading costs ──────────────────────────────────────────────────────────
+  // Every simulated swap pays: DEX fee + network fee + slippage. Net P&L
+  // includes all of it, and the dashboard shows each part per trade.
+  costs: {
+    // DEX swap fee, by the pool's dexId (as reported by DexScreener/GeckoTerminal).
+    // Matched case-insensitively ignoring "-"/"_", exact first, then by prefix
+    // (so "raydium-clmm" uses "raydium"). Unknown DEXes use `default`.
+    dexFeePct: {
+      pumpfun: 0.01, // pump.fun bonding curve: 1% per trade
+      pumpswap: 0.003, // PumpSwap AMM: 0.25% pool + 0.05% creator
+      raydium: 0.0025, // Raydium AMM v4: 0.25%
+      meteora: 0.003, // varies by pool; 0.3% is a typical small-cap pool
+      orca: 0.003, // Whirlpools: varies by tier; 0.3% typical
+      default: 0.003,
+    } as Record<string, number>,
+
+    // Solana fees per transaction, in SOL, converted with the live SOL price.
+    networkFeeSol: 0.000005, // base fee (5,000 lamports per signature)
+    priorityFeeSol: 0.0005, // priority fee / tip so the swap lands quickly on busy blocks
+    // SOL price used only if no live or previously stored SOL price exists.
+    fallbackSolPriceUsd: 150,
+
+    // Slippage = constant-product price impact + a fixed buffer.
+    //   impact = size / (liquidityUsd / 2 + size)   (liquidity is both sides; half is the side you swap into)
+    // Buys fill ABOVE the observed price, sells BELOW it.
+    extraSlippagePct: 0.005, // MEV / sandwiches / price moving inside the block
+
+    // Orders fill at the observed price this many ticks AFTER the decision,
+    // so the bot can't buy at exactly the price that triggered the buy.
+    // 1 = next tick (~45s later, realistic for a bot polling APIs). 0 = instant.
+    fillDelayTicks: 1,
   },
 
   filters: {
-    maxAgeMinutes: 60, // "very new"
-    minLiquidityUsd: 20_000,
-    minVolumeH1Usd: 5_000,
-    minTxnsH1: 30,
+    maxAgeMinutes: 60, // only buy pools younger than this ("very new")
+    minLiquidityUsd: 20_000, // skip thin pools (high slippage, easy to rug)
+    minVolumeH1Usd: 5_000, // needs real trading in the last hour
+    minTxnsH1: 30, // needs real activity, not one whale
     minSellsH1: 3, // honeypot hint: lots of buys, nobody can sell
     maxFdvToLiquidity: 40, // thin liquidity vs. valuation = easy to rug
-    maxPriceChangeM5Pct: 150, // don't chase a vertical candle
-    minPriceChangeM5Pct: -25, // don't catch a falling knife
+    maxPriceChangeM5Pct: 150, // don't chase a vertical candle (in %, not a fraction)
+    minPriceChangeM5Pct: -25, // don't catch a falling knife (in %, not a fraction)
     reentryCooldownMinutes: 120, // never re-buy a mint we traded recently
   },
 
   exits: {
-    hardStopPct: -0.08,
-    takeProfitPct: 0.25,
-    maxHoldMinutes: 12,
+    // Triggers compare the observed price with your FILL price (after slippage).
+    hardStopPct: -0.08, // sell if price is 8% below entry
+    takeProfitPct: 0.25, // sell if price is 25% above entry
+    maxHoldMinutes: 12, // sell anything held this long
     // Give-back: once the position has been up at least `armAtGainPct`,
     // exit if it has surrendered `givebackFraction` of its peak gain.
     givebackArmAtGainPct: 0.1,
@@ -43,11 +74,11 @@ export const CONFIG = {
   },
 
   retention: {
-    decisionsDays: 3,
-    candidatesHours: 6,
+    decisionsDays: 3, // keep the decision log this long
+    candidatesHours: 6, // keep the candidate feed this long
     // Only log a reject again if its reason changed (avoids ~100k identical rows/day).
     logUnchangedRejects: false,
   },
-} as const;
+};
 
 export type Config = typeof CONFIG;

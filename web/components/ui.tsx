@@ -34,6 +34,8 @@ const BADGE: Record<string, string> = {
   buy: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30",
   sell: "bg-sky-500/15 text-sky-300 ring-sky-500/30",
   reject: "bg-zinc-500/15 text-zinc-400 ring-zinc-500/30",
+  order: "bg-violet-500/15 text-violet-300 ring-violet-500/30",
+  cancel: "bg-orange-500/15 text-orange-300 ring-orange-500/30",
   skip: "bg-amber-500/15 text-amber-300 ring-amber-500/30",
   error: "bg-rose-500/15 text-rose-300 ring-rose-500/30",
   pass: "bg-emerald-500/15 text-emerald-300 ring-emerald-500/30",

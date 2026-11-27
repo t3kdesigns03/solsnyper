@@ -3,7 +3,6 @@ import { CONFIG } from "../src/config";
 import { planTick } from "../src/strategy/decide";
 import { evaluateEntry } from "../src/strategy/filters";
 import { evaluateExit } from "../src/strategy/exits";
-import { simulateBuy, simulateSell } from "../src/strategy/broker";
 import type { OpenPosition } from "../src/types";
 import { T0, snap } from "./fixtures";
 
@@ -32,21 +31,11 @@ describe("entry filters", () => {
   });
 });
 
-describe("broker fees", () => {
-  it("charges 0.8% round trip", () => {
-    const b = simulateBuy(20, 0.001, 0.008);
-    expect(b.feeUsd).toBeCloseTo(0.08);
-    expect(b.cashOut).toBeCloseTo(20.08);
-    const s = simulateSell({ quantity: b.quantity, size_usd: 20, entry_fee_usd: b.feeUsd }, 0.001, 0.008);
-    expect(s.pnlUsd).toBeCloseTo(-0.16); // flat price => lose exactly the fees
-  });
-});
-
 function pos(over: Partial<OpenPosition> = {}): OpenPosition {
   return {
     id: 1, mint: "M", symbol: "M", entry_price: 1, entry_time: T0, size_usd: 20, quantity: 20,
     entry_fee_usd: 0.08, entry_liquidity: 50_000, current_price: 1, current_liquidity: 50_000,
-    peak_price: 1, missed_updates: 0, ...over,
+    peak_price: 1, missed_updates: 0, dex_id: "raydium", ...over,
   };
 }
 const ex = (p: OpenPosition, price: number | null, mins = 1, liquidity: number | null = 50_000) =>
@@ -63,28 +52,36 @@ describe("exit rules", () => {
   it("stale price after 4 missed ticks", () => expect(ex(pos({ missed_updates: 3 }), null)).toBe("stale_price"));
 });
 
+// Instant fills keep these tests about ranking/caps; pending orders are tested in costs.test.ts.
+const INSTANT = { ...CONFIG, costs: { ...CONFIG.costs, fillDelayTicks: 0 } };
+const SOL = 200;
+
 describe("planTick", () => {
   it("buys the best passing candidates up to the per-tick cap and logs every decision", () => {
     const mints = ["A", "B", "C", "D"].map((m) => `Mint${m}`.padEnd(40, "1"));
     const snaps = new Map(mints.map((m, i) => [m, snap({ mint: m, symbol: m.slice(4, 5), liquidityUsd: 30_000 + i * 50_000, volumeH1Usd: 30_000 + i * 50_000 })]));
     snaps.set("MintBad".padEnd(40, "1"), snap({ mint: "MintBad".padEnd(40, "1"), liquidityUsd: 5_000 }));
     const discovered = [...snaps.keys(), "MintMissing".padEnd(40, "1")].map((m) => ({ mint: m, source: "test" }));
-    const plan = planTick({ now: T0, cfg: CONFIG, cashUsd: 1000, open: [], discovered, snapshots: snaps, recentlyTraded: new Map() });
+    const plan = planTick({ now: T0, cfg: INSTANT, solPriceUsd: SOL, cashUsd: 1000, open: [], discovered, snapshots: snaps, recentlyTraded: new Map() });
 
     expect(plan.buys.map((b) => b.snap.symbol)).toEqual(["D", "C", "B"]); // deepest liquidity scores highest
-    expect(plan.cashAfter).toBeCloseTo(1000 - 3 * 20.08);
+    const spent = plan.buys.reduce((a, b) => a + b.fill.cashOut, 0);
+    expect(spent).toBeCloseTo(3 * (20 + 0.000505 * SOL));
+    expect(plan.cashAfter).toBeCloseTo(1000 - spent);
     expect(plan.decisions.filter((d) => d.action === "skip")).toHaveLength(1);
     expect(plan.decisions.filter((d) => d.action === "reject")).toHaveLength(2);
-    expect(plan.equityAfter).toBeCloseTo(1000 - 3 * 0.16, 6);
+    // Equity drops by roughly the round-trip cost of each buy (marked net of exit costs).
+    expect(plan.equityAfter).toBeLessThan(1000 - 3 * 0.5);
+    expect(plan.equityAfter).toBeGreaterThan(1000 - 3 * 1.0);
   });
 
   it("is deterministic", () => {
-    const input = { now: T0, cfg: CONFIG, cashUsd: 1000, open: [], discovered: [{ mint: snap().mint, source: "t" }], snapshots: new Map([[snap().mint, snap()]]), recentlyTraded: new Map() };
+    const input = { now: T0, cfg: INSTANT, solPriceUsd: SOL, cashUsd: 1000, open: [], discovered: [{ mint: snap().mint, source: "t" }], snapshots: new Map([[snap().mint, snap()]]), recentlyTraded: new Map() };
     expect(JSON.stringify(planTick(input))).toBe(JSON.stringify(planTick(input)));
   });
 
   it("does not buy without cash", () => {
-    const plan = planTick({ now: T0, cfg: CONFIG, cashUsd: 10, open: [], discovered: [{ mint: snap().mint, source: "t" }], snapshots: new Map([[snap().mint, snap()]]), recentlyTraded: new Map() });
+    const plan = planTick({ now: T0, cfg: INSTANT, solPriceUsd: SOL, cashUsd: 10, open: [], discovered: [{ mint: snap().mint, source: "t" }], snapshots: new Map([[snap().mint, snap()]]), recentlyTraded: new Map() });
     expect(plan.buys).toHaveLength(0);
     expect(plan.decisions[0].reason).toMatch(/insufficient cash/);
   });

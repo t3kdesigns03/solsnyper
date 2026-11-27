@@ -36,13 +36,63 @@ Alarms never overlap (no double-buys), and Cloudflare retries them on failure. T
 
 | | Rule |
 |---|---|
-| Size | $20 per buy, 0.8% round-trip fees (0.4% each leg) |
+| Size | $20 per buy (network fee on top), max 10 open, max 3 new buys per tick |
+| Costs | DEX fee by pool (pump.fun 1%, Raydium 0.25%, others ~0.3%) + gas (0.000505 SOL/tx) + slippage (price impact + 0.5%); orders fill one tick (~45s) after the decision |
 | Entry | pair ≤ 60 min old, liquidity ≥ $20k, 1h volume ≥ $5k, ≥ 30 txns/1h, ≥ 3 sells/1h (honeypot hint), FDV/liquidity ≤ 40x, 5m change between −25% and +150%, not held, not traded in the last 2h |
 | Exits (first match wins) | stale price (4 missed ticks) → **−8% hard stop** → liquidity < 40% of entry (rug) → **+25% take profit** → **give-back**: after a +10% peak, exit once 60% of the gain is gone → **12 min max hold** |
 | Ranking | 0-100 score from liquidity, turnover, buy pressure, freshness |
 
-Fills happen at the observed price, so a stop can "gap" past −8% between ticks. That is
-deliberate: it's closer to reality.
+Orders fill one tick after the decision, at that tick's price plus slippage, so a stop can
+"gap" past −8%. That is deliberate: it's closer to reality.
+
+## Tuning
+
+Every threshold lives in `worker/src/config.ts`, each with a one-line comment. Change a
+number, run `npm test` and `npm run deploy` in `worker/`, then (optionally)
+`POST /api/reset` to start a fresh $1,000 run. Fractions are fractions: `0.01` = 1%.
+
+**Know your hurdle first.** With the defaults, a $20 buy + sell at an *unchanged* price costs:
+
+| Pool | DEX fees | Gas (SOL $72 / $200) | Slippage | Total, SOL $72 | Total, SOL $200 |
+|---|---|---|---|---|---|
+| pump.fun curve, $25k liquidity | $0.40 | $0.07 / $0.20 | $0.26 | **$0.73 (3.6%)** | $0.86 (4.3%) |
+| PumpSwap, $25k | $0.12 | $0.07 / $0.20 | $0.26 | **$0.45 (2.3%)** | $0.58 (2.9%) |
+| Raydium, $25k | $0.10 | $0.07 / $0.20 | $0.26 | **$0.43 (2.2%)** | $0.56 (2.8%) |
+| Raydium, $250k | $0.10 | $0.07 / $0.20 | $0.21 | **$0.38 (1.9%)** | $0.51 (2.5%) |
+| *old flat model* | | | | *$0.16 (0.8%)* | |
+
+So a trade has to move roughly **+2–4% just to break even**. The dashboard's **Cost model**
+panel shows these numbers live at the current SOL price.
+
+| Group | Knob | Default | What moving it does |
+|---|---|---|---|
+| wallet | `buySizeUsd` | 20 | Bigger = gas matters less, slippage matters more |
+| | `maxOpenPositions` / `maxBuysPerTick` | 10 / 3 | Exposure caps |
+| | `startingEquityUsd` | 1000 | Bankroll after `/api/reset` |
+| costs | `dexFeePct` | pumpfun 1%, pumpswap 0.3%, raydium 0.25%, meteora/orca 0.3%, default 0.3% | Per-DEX swap fee, matched on the pool's dexId (exact, then prefix) |
+| | `networkFeeSol` + `priorityFeeSol` | 0.000005 + 0.0005 SOL | Gas per transaction (2 per round trip), at the live SOL price |
+| | `extraSlippagePct` | 0.005 | Buffer on top of price impact (MEV, in-block moves) |
+| | `fillDelayTicks` | 1 | 0 = fill instantly at the trigger price (optimistic), 1 = next tick, 2+ = slower |
+| | `fallbackSolPriceUsd` | 150 | Only used if no SOL price was ever fetched |
+| filters | `maxAgeMinutes` | 60 | How new a pool must be |
+| | `minLiquidityUsd` | 20,000 | Higher = less slippage and rug risk, fewer trades |
+| | `minVolumeH1Usd` / `minTxnsH1` | 5,000 / 30 | Minimum real activity |
+| | `minSellsH1` | 3 | Honeypot hint |
+| | `maxFdvToLiquidity` | 40 | Thin liquidity vs. valuation = easy to rug |
+| | `minPriceChangeM5Pct` / `maxPriceChangeM5Pct` | −25 / 150 (percent) | Don't catch knives / chase candles |
+| | `reentryCooldownMinutes` | 120 | No re-buying a recent trade |
+| exits | `hardStopPct` | −0.08 | Stop loss, measured from your fill price |
+| | `takeProfitPct` | 0.25 | Take profit, measured from your fill price |
+| | `givebackArmAtGainPct` / `givebackFraction` | 0.10 / 0.6 | After +10%, exit once 60% of the peak gain is gone |
+| | `maxHoldMinutes` | 12 | Time stop |
+| | `liquidityCollapseFraction` | 0.4 | Exit if liquidity falls below 40% of entry |
+| | `maxMissedUpdates` | 4 | Close after this many ticks without a price |
+| — | `tickIntervalMs` | 45,000 | Loop speed (also the length of one fill delay) |
+
+Tips: with ~3% round-trip costs, a +25% take-profit nets about +22% and a −8% stop loses
+about −11%. Raising `minLiquidityUsd` or avoiding pump.fun pools (1% each way) cuts costs
+most. Each closed trade on the dashboard shows its DEX/gas/slippage split; hover it to see
+signal price vs. fill price.
 
 ### Extending it
 
@@ -117,7 +167,8 @@ Then set `ALLOWED_ORIGIN` in `wrangler.toml` to your Pages URL and redeploy the 
 
 | | |
 |---|---|
-| `GET /api/summary` | wallet, PnL, fees, last run, scheduler status, config |
+| `GET /api/summary` | wallet, PnL, cost totals + round-trip examples, pending orders, last run, scheduler status, config |
+| `GET /api/orders` | orders decided but not yet filled |
 | `GET /api/candidates` | latest candidates with pass/fail reason |
 | `GET /api/positions` · `/api/closed` · `/api/trades` | open positions, closed positions, raw buy/sell legs |
 | `GET /api/decisions?action=buy\|sell\|skip\|reject` | decision log |

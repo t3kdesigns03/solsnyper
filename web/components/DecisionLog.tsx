@@ -6,7 +6,7 @@ import { shortMint, time } from "@/lib/format";
 import type { Decision } from "@/lib/types";
 import { Badge, Empty, ErrorNote, Panel, Td, Th } from "./ui";
 
-const FILTERS = ["all", "buy", "sell", "skip", "reject"] as const;
+const FILTERS = ["all", "order", "buy", "sell", "cancel", "skip", "reject"] as const;
 
 export function DecisionLog() {
   const [f, setF] = useState<(typeof FILTERS)[number]>("all");

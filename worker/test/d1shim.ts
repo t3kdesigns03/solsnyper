@@ -32,7 +32,7 @@ class Stmt {
 
 export function makeD1() {
   const db = new DatabaseSync(":memory:");
-  db.exec(readFileSync(fileURLToPath(new URL("../migrations/0001_init.sql", import.meta.url) as any), "utf8"));
+  for (const f of ["0001_init.sql", "0002_costs.sql"]) db.exec(readFileSync(fileURLToPath(new URL(`../migrations/${f}`, import.meta.url) as any), "utf8"));
   const d1 = {
     prepare: (sql: string) => new Stmt(db, sql),
     async batch(stmts: Stmt[]) {
