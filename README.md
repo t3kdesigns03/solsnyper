@@ -74,6 +74,12 @@ panel shows these numbers live at the current SOL price.
 | | `extraSlippagePct` | 0.005 | Buffer on top of price impact (MEV, in-block moves) |
 | | `fillDelayTicks` | 1 | 0 = fill instantly at the trigger price (optimistic), 1 = next tick, 2+ = slower |
 | | `fallbackSolPriceUsd` | 150 | Only used if no SOL price was ever fetched |
+| | `usePatientPriorityFee` / `patientPriorityFeeSol` | false / 0.0001 | Cheaper gas; in real life risks slower fills (not modelled, so a best case) |
+| costControl | `maxRoundTripCostPct` | 0.03 | Skip pools whose $-size round trip costs more; re-checked at fill, so a pool drained between signal and fill is cancelled instead of bought |
+| | `minEdgeMultiple` | 2 | Take-profit must be ≥ this × the pool's round-trip cost |
+| | `skipPumpFunCurve` | false | Skip pump.fun curve pools outright (the 3% cap already excludes them) |
+| | `maxBuysPerHour` | 12 | Rolling-hour cap on buys (fills + pending orders) |
+| | `symbolCooldownMinutes` | 0 (off) | Skip a symbol bought recently under another mint (relaunch rugs) |
 | filters | `maxAgeMinutes` | 60 | How new a pool must be |
 | | `minLiquidityUsd` | 20,000 | Higher = less slippage and rug risk, fewer trades |
 | | `minVolumeH1Usd` / `minTxnsH1` | 5,000 / 30 | Minimum real activity |

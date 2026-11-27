@@ -32,6 +32,11 @@ export const CONFIG = {
     // Solana fees per transaction, in SOL, converted with the live SOL price.
     networkFeeSol: 0.000005, // base fee (5,000 lamports per signature)
     priorityFeeSol: 0.0005, // priority fee / tip so the swap lands quickly on busy blocks
+    // "Patient" mode pays a smaller priority fee. Cheaper, but in real life the
+    // swap can land later (worse price) or not at all on busy blocks; this sim
+    // does NOT model that risk, so treat its savings as a best case.
+    usePatientPriorityFee: false,
+    patientPriorityFeeSol: 0.0001,
     // SOL price used only if no live or previously stored SOL price exists.
     fallbackSolPriceUsd: 150,
 
@@ -44,6 +49,31 @@ export const CONFIG = {
     // so the bot can't buy at exactly the price that triggered the buy.
     // 1 = next tick (~45s later, realistic for a bot polling APIs). 0 = instant.
     fillDelayTicks: 1,
+  },
+
+  // ── Cost control: strategy rules that avoid expensive or pointless trades ──
+  // Each shows up as a reject/skip/cancel reason in the decision log.
+  costControl: {
+    // Skip a buy if a $buySizeUsd round trip in THIS pool (its DEX fee, its
+    // liquidity, current gas) would cost more than this share of the trade.
+    // Also re-checked when a delayed order fills: if the pool got thinner (or
+    // was drained) in the meantime, the order is cancelled instead of filled.
+    maxRoundTripCostPct: 0.03,
+    // Skip a buy unless takeProfitPct is at least this many times the pool's
+    // round-trip cost, so a winning trade isn't mostly eaten by costs.
+    minEdgeMultiple: 2,
+    // pump.fun bonding-curve pools charge 1% each way (dexId "pumpfun").
+    // Off by default: with a 3% cap they're already excluded (2% fees + 1%
+    // slippage buffer > 3% at any liquidity). Turn on if you raise the cap.
+    skipPumpFunCurve: false,
+    // Max buys (fills + orders placed) in any rolling 60 minutes. The first
+    // live hour after the cost model went live had ~50 buys/hour.
+    maxBuysPerHour: 12,
+    // Skip a new token whose SYMBOL we bought in the last N minutes (a different
+    // mint). Rugged coins are often relaunched under the same name minutes later.
+    // 0 = off (default): on the first live hour it removed as many winners as
+    // rugs. Try 120 to test it. The per-mint cooldown is filters.reentryCooldownMinutes.
+    symbolCooldownMinutes: 0,
   },
 
   filters: {

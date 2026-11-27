@@ -153,6 +153,18 @@ export async function runTick(env: Env, now = Date.now(), sources: Sources = liv
       .all<{ mint: string; t: number }>()
   ).results;
   const recentlyTraded = new Map(recent.map((r) => [r.mint, r.t]));
+  // Cost control: symbols bought recently (relaunch check) and the rolling-hour buy count.
+  const symWindow = Math.max(1, cfg.costControl.symbolCooldownMinutes) * 60_000;
+  const recentSymbols = new Map(
+    (
+      await db
+        .prepare("SELECT UPPER(symbol) AS s, MAX(timestamp) AS t FROM trades WHERE side='buy' AND timestamp > ? GROUP BY UPPER(symbol)")
+        .bind(now - symWindow)
+        .all<{ s: string; t: number }>()
+    ).results.map((r) => [r.s, r.t]),
+  );
+  const buysLastHour =
+    (await db.prepare("SELECT COUNT(*) AS n FROM trades WHERE side='buy' AND timestamp > ?").bind(now - 3_600_000).first<{ n: number }>())?.n ?? 0;
   const prevReasons = new Map(
     (
       await db
@@ -172,7 +184,7 @@ export async function runTick(env: Env, now = Date.now(), sources: Sources = liv
   // --- decide (pure)
   const plan = planTick({
     now, cfg, cashUsd: wallet.cash_usd, solPriceUsd: solPrice, open, pending,
-    discovered: market.mints, snapshots: market.snapshots, recentlyTraded,
+    discovered: market.mints, snapshots: market.snapshots, recentlyTraded, recentSymbols, buysLastHour,
   });
 
   // --- persist

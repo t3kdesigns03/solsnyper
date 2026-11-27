@@ -55,8 +55,13 @@ export function priceImpact(sizeUsd: number, liquidityUsd: number): number {
   return sizeUsd / (half + sizeUsd);
 }
 
+/** SOL paid per transaction: base fee + the active priority fee (normal or patient). */
+export function txFeeSol(costs: Costs): number {
+  return costs.networkFeeSol + (costs.usePatientPriorityFee ? costs.patientPriorityFeeSol : costs.priorityFeeSol);
+}
+
 export function networkFeeUsd(solPriceUsd: number, costs: Costs): number {
-  return (costs.networkFeeSol + costs.priorityFeeSol) * solPriceUsd;
+  return txFeeSol(costs) * solPriceUsd;
 }
 
 export interface MarketAtFill {

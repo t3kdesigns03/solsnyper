@@ -1,8 +1,8 @@
 import type { Config } from "../config";
 import type { DiscoveredMint, MarketSnapshot, OpenPosition, PendingOrder } from "../types";
-import { type BuyFill, type MarketAtFill, markToMarket, type SellFill, simulateBuy, simulateSell } from "./broker";
+import { type BuyFill, type MarketAtFill, markToMarket, type SellFill, simulateBuy, simulateSell, txFeeSol } from "./broker";
 import { evaluateExit } from "./exits";
-import { evaluateEntry } from "./filters";
+import { evaluateEntry, poolRoundTripCostPct } from "./filters";
 import { scoreCandidate } from "./scoring";
 
 // The whole trading brain for one tick, as a PURE function:
@@ -25,6 +25,8 @@ export interface TickInput {
   discovered: DiscoveredMint[];
   snapshots: Map<string, MarketSnapshot>;
   recentlyTraded: Map<string, number>; // mint -> last trade ms
+  recentSymbols?: Map<string, number>; // UPPERCASE symbol -> last buy ms
+  buysLastHour?: number; // buys filled in the last 60 minutes
 }
 
 export interface PlannedBuy {
@@ -188,7 +190,8 @@ export function planTick(input: TickInput): TickPlan {
   const held = new Set(stillOpen.map((o) => o.pos.mint));
   let slots = cfg.wallet.maxOpenPositions - stillOpen.length;
   let reserved = 0; // cash earmarked for buy orders that haven't filled yet
-  const estCashOut = cfg.wallet.buySizeUsd + (costs.networkFeeSol + costs.priorityFeeSol) * sol;
+  const estCashOut = cfg.wallet.buySizeUsd + txFeeSol(costs) * sol;
+  const maxRt = cfg.costControl.maxRoundTripCostPct;
 
   for (const o of pending.filter((p) => p.side === "buy")) {
     if (!due(o)) {
@@ -203,6 +206,12 @@ export function planTick(input: TickInput): TickPlan {
     if (!snap || snap.priceUsd <= 0) cancel = "no price at fill time";
     else if (held.has(o.mint)) cancel = "already holding this mint";
     else if (slots <= 0) cancel = `max ${cfg.wallet.maxOpenPositions} open positions`;
+    else {
+      // Re-check the pool before filling: if it thinned out or was drained since
+      // the signal, a real bot would see a terrible quote and not send the swap.
+      const rt = poolRoundTripCostPct(snap, cfg, sol);
+      if (rt > maxRt) cancel = `pool too thin at fill: round trip ${(rt * 100).toFixed(1)}% > ${(maxRt * 100).toFixed(1)}% (liquidity ${Math.round(snap.liquidityUsd).toLocaleString("en-US")})`;
+    }
     const fill = snap && !cancel ? simulateBuy(cfg.wallet.buySizeUsd, { price: snap.priceUsd, liquidityUsd: snap.liquidityUsd, dexId: snap.dexId, solPriceUsd: sol }, costs) : null;
     if (fill && cash < fill.cashOut) cancel = `insufficient cash ($${cash.toFixed(2)})`;
     if (cancel || !snap || !fill) {
@@ -225,6 +234,10 @@ export function planTick(input: TickInput): TickPlan {
   }
 
   // 3) Filter discovered mints (deduped, first source wins).
+  const recentSymbols = new Map(input.recentSymbols ?? []);
+  for (const o of pending) if (o.side === "buy") recentSymbols.set(o.symbol.toUpperCase(), o.signal_time);
+  // Rolling-hour buy count: filled buys + every buy order still pending.
+  let hourBuys = (input.buysLastHour ?? 0) + pending.filter((o) => o.side === "buy").length;
   const seen = new Set<string>();
   const candidates: CandidateRow[] = [];
   const passed: { row: CandidateRow; snap: MarketSnapshot; score: number }[] = [];
@@ -237,7 +250,7 @@ export function planTick(input: TickInput): TickPlan {
       candidates.push({ mint: d.mint, symbol: d.hintSymbol ?? "?", source: d.source, snap: null, passed: false, reason: "no Solana pool with price data yet", score: null });
       continue;
     }
-    const res = evaluateEntry(snap, { now, cfg, held, recentlyTraded });
+    const res = evaluateEntry(snap, { now, cfg, held, recentlyTraded, recentSymbols, solPriceUsd: sol });
     const score = scoreCandidate(snap);
     const row: CandidateRow = { mint: d.mint, symbol: snap.symbol, source: d.source, snap, passed: res.passed, reason: res.reason, score };
     candidates.push(row);
@@ -247,6 +260,8 @@ export function planTick(input: TickInput): TickPlan {
   // Rank survivors; ties broken by mint for determinism.
   passed.sort((a, b) => b.score - a.score || a.snap.mint.localeCompare(b.snap.mint));
   let signals = 0;
+  const boughtThisTick = new Set<string>();
+  const symbolTaken = (sym: string) => cfg.costControl.symbolCooldownMinutes > 0 && boughtThisTick.has(sym.toUpperCase());
 
   for (const c of passed) {
     const m: MarketAtFill = { price: c.snap.priceUsd, liquidityUsd: c.snap.liquidityUsd, dexId: c.snap.dexId, solPriceUsd: sol };
@@ -254,6 +269,8 @@ export function planTick(input: TickInput): TickPlan {
     let skip: string | null = null;
     if (signals >= cfg.wallet.maxBuysPerTick) skip = `max ${cfg.wallet.maxBuysPerTick} buys per tick`;
     else if (slots <= 0) skip = `max ${cfg.wallet.maxOpenPositions} open positions`;
+    else if (hourBuys >= cfg.costControl.maxBuysPerHour) skip = `max ${cfg.costControl.maxBuysPerHour} buys per hour`;
+    else if (symbolTaken(c.snap.symbol)) skip = `symbol ${c.snap.symbol} already bought this tick under another mint`;
     else if (cash - reserved < fill.cashOut) skip = `insufficient cash ($${(cash - reserved).toFixed(2)} free)`;
 
     if (skip) {
@@ -262,8 +279,10 @@ export function planTick(input: TickInput): TickPlan {
       continue;
     }
     signals += 1;
+    hourBuys += 1;
     slots -= 1;
     held.add(c.snap.mint);
+    boughtThisTick.add(c.snap.symbol.toUpperCase());
     const why = `score ${c.score}`;
     if (delay === 0) {
       cash -= fill.cashOut;

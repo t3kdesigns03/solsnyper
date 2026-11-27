@@ -26,6 +26,7 @@ export interface Summary {
     tickIntervalMs: number;
     wallet: { buySizeUsd: number; maxOpenPositions: number; maxBuysPerTick: number };
     costs: CostSettings;
+    costControl?: CostControl;
     filters: { minLiquidityUsd: number; maxAgeMinutes: number };
     exits: { hardStopPct: number; takeProfitPct: number; maxHoldMinutes: number };
   };
@@ -45,6 +46,16 @@ export interface CostSettings {
   fallbackSolPriceUsd: number;
   extraSlippagePct: number;
   fillDelayTicks: number;
+  usePatientPriorityFee?: boolean;
+  patientPriorityFeeSol?: number;
+}
+
+export interface CostControl {
+  maxRoundTripCostPct: number;
+  minEdgeMultiple: number;
+  skipPumpFunCurve: boolean;
+  maxBuysPerHour: number;
+  symbolCooldownMinutes: number;
 }
 
 export interface CostExamples {

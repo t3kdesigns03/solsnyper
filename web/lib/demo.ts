@@ -104,7 +104,8 @@ function build() {
     scheduler: { nextAlarm: now + 33_000, paused: false },
     config: {
       tickIntervalMs: 45_000, wallet: { buySizeUsd: 20, maxOpenPositions: 10, maxBuysPerTick: 3 },
-      costs: { dexFeePct: { pumpfun: 0.01, pumpswap: 0.003, raydium: 0.0025, meteora: 0.003, orca: 0.003, default: 0.003 }, networkFeeSol: 0.000005, priorityFeeSol: 0.0005, fallbackSolPriceUsd: 150, extraSlippagePct: 0.005, fillDelayTicks: 1 },
+      costs: { dexFeePct: { pumpfun: 0.01, pumpswap: 0.003, raydium: 0.0025, meteora: 0.003, orca: 0.003, default: 0.003 }, networkFeeSol: 0.000005, priorityFeeSol: 0.0005, fallbackSolPriceUsd: 150, extraSlippagePct: 0.005, fillDelayTicks: 1, usePatientPriorityFee: false, patientPriorityFeeSol: 0.0001 },
+      costControl: { maxRoundTripCostPct: 0.03, minEdgeMultiple: 2, skipPumpFunCurve: false, maxBuysPerHour: 12, symbolCooldownMinutes: 0 },
       filters: { minLiquidityUsd: 20_000, maxAgeMinutes: 60 }, exits: { hardStopPct: -0.08, takeProfitPct: 0.25, maxHoldMinutes: 12 },
     },
   };
