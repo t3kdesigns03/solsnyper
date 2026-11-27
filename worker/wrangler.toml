@@ -22,8 +22,8 @@ tag = "v1"
 new_sqlite_classes = ["Scheduler"] # SQLite-backed DO: works on the Workers free plan
 
 [vars]
-# Set to your Pages URL (e.g. https://solsnyper.pages.dev) to lock CORS down.
-ALLOWED_ORIGIN = "https://solsniperr.netlify.app"
+# Dashboard origins allowed to call the API: "*" or a comma-separated list.
+ALLOWED_ORIGIN = "https://solsniperr.netlify.app,https://snipetester.clidk.com"
 # Unofficial endpoint; set "false" if it starts failing or you don't want it.
 ENABLE_PUMPFUN = "true"
 # GeckoTerminal: new-pool discovery + primary price/liquidity source.

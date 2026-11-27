@@ -15,12 +15,26 @@ import type { Env } from "./types";
 //   POST /api/pause|resume pause / resume ticking    (Bearer ADMIN_TOKEN)
 //   POST /api/reset        wipe and restart at $1000 (Bearer ADMIN_TOKEN)
 
+/**
+ * CORS origin to send back. ALLOWED_ORIGIN is "*" or a comma-separated
+ * allowlist; a listed request Origin is echoed back (browsers accept only one
+ * origin per response). Unlisted origins get the first entry, which the
+ * browser then rejects.
+ */
+export function corsOrigin(allowed: string | undefined, requestOrigin: string | null): string {
+  const list = (allowed || "*").split(",").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean);
+  if (list.length === 0 || list.includes("*")) return "*";
+  const origin = requestOrigin?.replace(/\/$/, "") ?? "";
+  return list.includes(origin) ? origin : list[0];
+}
+
 export async function handleApi(req: Request, env: Env): Promise<Response> {
   const url = new URL(req.url);
   const cors = {
-    "access-control-allow-origin": env.ALLOWED_ORIGIN || "*",
+    "access-control-allow-origin": corsOrigin(env.ALLOWED_ORIGIN, req.headers.get("origin")),
     "access-control-allow-methods": "GET,POST,OPTIONS",
     "access-control-allow-headers": "authorization,content-type",
+    vary: "Origin",
   };
   const json = (data: unknown, status = 200) =>
     new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json", "cache-control": "no-store", ...cors } });

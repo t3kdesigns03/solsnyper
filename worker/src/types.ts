@@ -61,7 +61,7 @@ export interface Env {
   DB: D1Database;
   SCHEDULER: DurableObjectNamespace;
   ADMIN_TOKEN?: string; // optional secret; required for POST /api/run and /api/reset
-  ALLOWED_ORIGIN?: string; // CORS origin for the dashboard, "*" if unset
+  ALLOWED_ORIGIN?: string; // dashboard origins: "*" or comma-separated list ("*" if unset)
   ENABLE_PUMPFUN?: string; // "false" to disable the unofficial pump.fun source
   ENABLE_GECKOTERMINAL?: string; // "false" to disable GeckoTerminal (primary price source)
   ENABLE_DEXSCREENER?: string; // "false" to disable DexScreener (discovery + price fallback)
