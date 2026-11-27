@@ -11,7 +11,7 @@ crons = ["* * * * *"]
 [[d1_databases]]
 binding = "DB"
 database_name = "solsnyper"
-database_id = "REPLACE_WITH_ID_FROM_wrangler_d1_create"
+database_id = "920ea6fb-85cb-4e14-be2e-aca07ac1c48b"
 migrations_dir = "migrations"
 
 [durable_objects]
@@ -23,7 +23,7 @@ new_sqlite_classes = ["Scheduler"] # SQLite-backed DO: works on the Workers free
 
 [vars]
 # Set to your Pages URL (e.g. https://solsnyper.pages.dev) to lock CORS down.
-ALLOWED_ORIGIN = "*"
+ALLOWED_ORIGIN = "https://solsniperr.netlify.app"
 # Unofficial endpoint; set "false" if it starts failing or you don't want it.
 ENABLE_PUMPFUN = "true"
 
