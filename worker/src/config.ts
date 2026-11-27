@@ -195,7 +195,9 @@ export const STABLE_CONFIG: Config = {
     minVolumeH24Usd: 250_000, // and steadily over the day
     minTxnsH1: 100,
     minSellsH1: 20,
-    maxFdvToLiquidity: 30,
+    // Established tokens normally have FDV far above one pool's liquidity (PUMP ~117x);
+    // 30x is a rug check for brand-new coins, so the stable lane allows 150x.
+    maxFdvToLiquidity: 150,
     // Entry signal: uptrend with a small pullback ("buy the dip in a trend").
     minPriceChangeH1Pct: 2, // 1h trend up at least +2%...
     maxPriceChangeH1Pct: 40, // ...but not a parabolic spike
