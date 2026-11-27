@@ -49,7 +49,30 @@ export function CostSettings() {
               <dt className="text-zinc-500">Pace</dt>
               <dd className="text-zinc-200">max {cc.maxBuysPerHour} buys per rolling hour</dd>
               <dt className="text-zinc-500">Venues</dt>
-              <dd className="text-zinc-200">pump.fun curve {cc.skipPumpFunCurve ? "skipped" : "allowed (cost cap still applies)"}</dd>
+              <dd className="text-zinc-200">bonding-curve pools (pump.fun, Meteora DBC) {cc.skipBondingCurves ? "skipped" : "allowed (cost cap still applies)"}</dd>
+              {cc.maxLiquidityDropAtFillPct !== undefined && (
+                <>
+                  <dt className="text-zinc-500">Rug check</dt>
+                  <dd className="text-zinc-200">cancel a buy if liquidity fell over {pct(cc.maxLiquidityDropAtFillPct, 0)} between signal and fill</dd>
+                </>
+              )}
+              <dt className="text-zinc-500">Sizing</dt>
+              <dd className="text-zinc-200">
+                {usd(s.config.wallet.buySizeUsd, 0)}
+                {s.config.wallet.maxBuySizeUsd && s.config.wallet.maxBuySizeUsd > s.config.wallet.buySizeUsd
+                  ? ` up to ${usd(s.config.wallet.maxBuySizeUsd, 0)} in deep pools (≤ ${pct(s.config.wallet.maxPoolSharePct ?? 0, 1)} of liquidity, within the cost cap)`
+                  : " fixed"}
+              </dd>
+              {(s.config.filters.minScore || s.config.filters.maxLiquidityUsd) && (
+                <>
+                  <dt className="text-zinc-500">Entry</dt>
+                  <dd className="text-zinc-200">
+                    {s.config.filters.minScore ? `score ≥ ${s.config.filters.minScore}` : ""}
+                    {s.config.filters.minScore && s.config.filters.maxLiquidityUsd ? " · " : ""}
+                    {s.config.filters.maxLiquidityUsd ? `liquidity ≤ ${usd(s.config.filters.maxLiquidityUsd, 0)}` : ""}
+                  </dd>
+                </>
+              )}
               <dt className="text-zinc-500">Relaunches</dt>
               <dd className="text-zinc-200">
                 {cc.symbolCooldownMinutes > 0 ? `skip a symbol bought in the last ${cc.symbolCooldownMinutes}m under another mint` : "off (same symbol, new mint allowed)"}

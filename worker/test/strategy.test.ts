@@ -53,7 +53,13 @@ describe("exit rules", () => {
 });
 
 // Instant fills keep these tests about ranking/caps; pending orders are tested in costs.test.ts.
-const INSTANT = { ...CONFIG, costs: { ...CONFIG.costs, fillDelayTicks: 0 } };
+// Also pinned to $20 fixed size with no liquidity ceiling / min score, to keep these about ranking and caps.
+const INSTANT = {
+  ...CONFIG,
+  wallet: { ...CONFIG.wallet, buySizeUsd: 20, maxBuySizeUsd: 20 },
+  filters: { ...CONFIG.filters, maxLiquidityUsd: 0, minScore: 0 },
+  costs: { ...CONFIG.costs, fillDelayTicks: 0 },
+};
 const SOL = 200;
 
 describe("planTick", () => {

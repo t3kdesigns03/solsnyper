@@ -24,10 +24,10 @@ export interface Summary {
   scheduler: { nextAlarm: number | null; paused: boolean } | null;
   config: {
     tickIntervalMs: number;
-    wallet: { buySizeUsd: number; maxOpenPositions: number; maxBuysPerTick: number };
+    wallet: { buySizeUsd: number; maxBuySizeUsd?: number; maxPoolSharePct?: number; maxOpenPositions: number; maxBuysPerTick: number };
     costs: CostSettings;
     costControl?: CostControl;
-    filters: { minLiquidityUsd: number; maxAgeMinutes: number };
+    filters: { minLiquidityUsd: number; maxLiquidityUsd?: number; minScore?: number; maxAgeMinutes: number };
     exits: { hardStopPct: number; takeProfitPct: number; maxHoldMinutes: number };
   };
 }
@@ -53,7 +53,8 @@ export interface CostSettings {
 export interface CostControl {
   maxRoundTripCostPct: number;
   minEdgeMultiple: number;
-  skipPumpFunCurve: boolean;
+  skipBondingCurves: boolean;
+  maxLiquidityDropAtFillPct?: number;
   maxBuysPerHour: number;
   symbolCooldownMinutes: number;
 }

@@ -55,6 +55,7 @@ export interface PendingOrder {
   reason: string; // buys: why it was bought; sells: "rule: reason"
   score: number | null;
   ticks_waited: number;
+  signal_liquidity: number | null; // pool liquidity when the decision was made (buys)
 }
 
 export interface Env {

@@ -49,9 +49,9 @@ Orders fill one tick after the decision, at that tick's price plus slippage, so 
 
 Every threshold lives in `worker/src/config.ts`, each with a one-line comment. Change a
 number, run `npm test` and `npm run deploy` in `worker/`, then (optionally)
-`POST /api/reset` to start a fresh $1,000 run. Fractions are fractions: `0.01` = 1%.
+`POST /api/reset` (or the dashboard's **Reset paper wallet** button) to start a fresh run. Fractions are fractions: `0.01` = 1%.
 
-**Know your hurdle first.** With the defaults, a $20 buy + sell at an *unchanged* price costs:
+**Know your hurdle first.** A $20 buy + sell at an *unchanged* price costs (at the $100 default, add ~0.5–1 point in $25–40k pools for the extra price impact):
 
 | Pool | DEX fees | Gas (SOL $72 / $200) | Slippage | Total, SOL $72 | Total, SOL $200 |
 |---|---|---|---|---|---|
@@ -66,9 +66,10 @@ panel shows these numbers live at the current SOL price.
 
 | Group | Knob | Default | What moving it does |
 |---|---|---|---|
-| wallet | `buySizeUsd` | 20 | Bigger = gas matters less, slippage matters more |
+| wallet | `buySizeUsd` | 100 | Base (and minimum) trade size. Bigger = gas matters less, slippage matters more |
+| | `maxBuySizeUsd` / `maxPoolSharePct` | 250 / 0.005 | Scale up in deep pools: never above 0.5% of liquidity, only while the round trip stays under the cost cap |
 | | `maxOpenPositions` / `maxBuysPerTick` | 10 / 3 | Exposure caps |
-| | `startingEquityUsd` | 1000 | Bankroll after `/api/reset` |
+| | `startingEquityUsd` | 10,000 | Default bankroll for `/api/reset` (the dashboard's reset button can set its own) |
 | costs | `dexFeePct` | pumpfun 1%, pumpswap 0.3%, raydium 0.25%, meteora/orca 0.3%, default 0.3% | Per-DEX swap fee, matched on the pool's dexId (exact, then prefix) |
 | | `networkFeeSol` + `priorityFeeSol` | 0.000005 + 0.0005 SOL | Gas per transaction (2 per round trip), at the live SOL price |
 | | `extraSlippagePct` | 0.005 | Buffer on top of price impact (MEV, in-block moves) |
@@ -77,11 +78,14 @@ panel shows these numbers live at the current SOL price.
 | | `usePatientPriorityFee` / `patientPriorityFeeSol` | false / 0.0001 | Cheaper gas; in real life risks slower fills (not modelled, so a best case) |
 | costControl | `maxRoundTripCostPct` | 0.03 | Skip pools whose $-size round trip costs more; re-checked at fill, so a pool drained between signal and fill is cancelled instead of bought |
 | | `minEdgeMultiple` | 2 | Take-profit must be ≥ this × the pool's round-trip cost |
-| | `skipPumpFunCurve` | false | Skip pump.fun curve pools outright (the 3% cap already excludes them) |
+| | `skipBondingCurves` | true | Skip bonding-curve pools (pump.fun curve, Meteora DBC): pre-migration tokens |
+| | `maxLiquidityDropAtFillPct` | 0.3 | Cancel a delayed buy if liquidity fell more than 30% between signal and fill |
 | | `maxBuysPerHour` | 12 | Rolling-hour cap on buys (fills + pending orders) |
 | | `symbolCooldownMinutes` | 0 (off) | Skip a symbol bought recently under another mint (relaunch rugs) |
 | filters | `maxAgeMinutes` | 60 | How new a pool must be |
 | | `minLiquidityUsd` | 20,000 | Higher = less slippage and rug risk, fewer trades |
+| | `maxLiquidityUsd` | 80,000 | Skip brand-new pools seeded with more (seeded-and-pulled rugs). 0 = off |
+| | `minScore` | 50 | Minimum candidate score (0–100). 0 = off |
 | | `minVolumeH1Usd` / `minTxnsH1` | 5,000 / 30 | Minimum real activity |
 | | `minSellsH1` | 3 | Honeypot hint |
 | | `maxFdvToLiquidity` | 40 | Thin liquidity vs. valuation = easy to rug |

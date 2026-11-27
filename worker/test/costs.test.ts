@@ -68,7 +68,7 @@ const base = (over: Partial<TickInput> = {}): TickInput => ({
   discovered: [{ mint, source: "t" }], snapshots: new Map([[mint, snap()]]), recentlyTraded: new Map(), ...over,
 });
 const order = (over: Partial<PendingOrder> = {}): PendingOrder => ({
-  id: 7, side: "buy", mint, symbol: "GOOD", position_id: null, signal_price: 0.001, signal_time: T0, reason: "score 70", score: 70, ticks_waited: 0, ...over,
+  id: 7, side: "buy", mint, symbol: "GOOD", position_id: null, signal_price: 0.001, signal_time: T0, reason: "score 70", score: 70, ticks_waited: 0, signal_liquidity: null, ...over,
 });
 const position = (over: Partial<OpenPosition> = {}): OpenPosition => ({
   id: 1, mint, symbol: "GOOD", entry_price: 0.001, entry_time: T0, size_usd: 20, quantity: 19_000, entry_fee_usd: 0.101,

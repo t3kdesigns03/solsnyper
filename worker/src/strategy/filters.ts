@@ -23,10 +23,23 @@ export interface FilterContext {
   solPriceUsd?: number;
 }
 
-/** Estimated round-trip cost of a buySizeUsd trade in this pool, as a fraction of the size. */
-export function poolRoundTripCostPct(s: MarketSnapshot, cfg: Config, solPriceUsd = 0): number {
+/** Estimated round-trip cost of a `sizeUsd` trade (default: the base size) in this pool, as a fraction of the size. */
+export function poolRoundTripCostPct(s: MarketSnapshot, cfg: Config, solPriceUsd = 0, sizeUsd = cfg.wallet.buySizeUsd): number {
   const sol = solPriceUsd > 0 ? solPriceUsd : cfg.costs.fallbackSolPriceUsd;
-  return roundTripCost(cfg.wallet.buySizeUsd, { price: s.priceUsd, liquidityUsd: s.liquidityUsd, dexId: s.dexId, solPriceUsd: sol }, cfg.costs).pctOfSize;
+  return roundTripCost(sizeUsd, { price: s.priceUsd, liquidityUsd: s.liquidityUsd, dexId: s.dexId, solPriceUsd: sol }, cfg.costs).pctOfSize;
+}
+
+/**
+ * Liquidity-aware trade size: the base size, scaled up toward maxBuySizeUsd
+ * only when the pool is deep enough (<= maxPoolSharePct of liquidity) and the
+ * round trip at that size stays under the cost cap. Steps down in $25 steps.
+ */
+export function tradeSizeUsd(s: MarketSnapshot, cfg: Config, solPriceUsd = 0): number {
+  const base = cfg.wallet.buySizeUsd;
+  const max = Math.max(base, cfg.wallet.maxBuySizeUsd);
+  let size = Math.min(max, Math.floor((s.liquidityUsd * cfg.wallet.maxPoolSharePct) / 25) * 25);
+  while (size > base && poolRoundTripCostPct(s, cfg, solPriceUsd, size) > cfg.costControl.maxRoundTripCostPct) size -= 25;
+  return Math.max(base, size);
 }
 
 export interface EntryRule {
@@ -68,6 +81,13 @@ export const ENTRY_RULES: EntryRule[] = [
     check: (s, { cfg }) =>
       s.liquidityUsd < cfg.filters.minLiquidityUsd
         ? `liquidity ${fmtUsd(s.liquidityUsd)} < ${fmtUsd(cfg.filters.minLiquidityUsd)}`
+        : null,
+  },
+  {
+    name: "max_liquidity",
+    check: (s, { cfg }) =>
+      cfg.filters.maxLiquidityUsd > 0 && s.liquidityUsd > cfg.filters.maxLiquidityUsd
+        ? `liquidity ${fmtUsd(s.liquidityUsd)} > ${fmtUsd(cfg.filters.maxLiquidityUsd)} (new pool, seeded-and-pulled risk)`
         : null,
   },
   {
@@ -127,10 +147,10 @@ export const ENTRY_RULES: EntryRule[] = [
     },
   },
   {
-    name: "pumpfun_curve",
+    name: "bonding_curve",
     check: (s, { cfg }) =>
-      cfg.costControl.skipPumpFunCurve && /^pump[-_ ]?fun$/i.test(s.dexId ?? "")
-        ? "pump.fun bonding curve (1% fee each way)"
+      cfg.costControl.skipBondingCurves && /^(pump[-_ ]?fun|meteora[-_ ]?dbc)$/i.test(s.dexId ?? "")
+        ? `bonding-curve pool (${s.dexId}), pre-migration token`
         : null,
   },
   {

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CONFIG } from "../src/config";
 import { runTick, type Sources } from "../src/engine";
 import { simulateBuy, simulateSell } from "../src/strategy/broker";
+import { tradeSizeUsd } from "../src/strategy/filters";
 import type { Env, MarketSnapshot } from "../src/types";
 import { makeD1 } from "./d1shim";
 import { T0, snap } from "./fixtures";
@@ -37,12 +38,19 @@ describe("runTick end-to-end (SQLite-backed D1 shim)", () => {
     price = 0.00102;
     await runTick(env, T0 + 45_000, sources);
     const m1 = { price, liquidityUsd: LIQ, dexId: "raydium", solPriceUsd: SOL };
-    const buy = simulateBuy(20, m1, CONFIG.costs);
+    // $50k pool: liquidity-aware sizing scales the $100 base up (max 0.5% of the pool, cost cap permitting).
+    const size = tradeSizeUsd(snap({ priceUsd: price, liquidityUsd: LIQ }), CONFIG, SOL);
+    expect(size).toBeGreaterThan(CONFIG.wallet.buySizeUsd);
+    expect(size).toBeLessThanOrEqual(LIQ * CONFIG.wallet.maxPoolSharePct);
+    const buy = simulateBuy(size, m1, CONFIG.costs);
     let p = q("SELECT * FROM positions WHERE status='open'");
     expect(p.entry_signal_price).toBe(0.001);
     expect(p.entry_price).toBeCloseTo(buy.fillPrice, 12);
     expect(p.entry_price).toBeGreaterThan(price);
-    expect(p.entry_dex_fee_usd).toBeCloseTo(0.05); // raydium 0.25% of $20
+    expect(p.size_usd).toBe(size);
+    expect(p.entry_dex_fee_usd).toBeCloseTo(0.0025 * size); // raydium 0.25%
+    expect(p.entry_signal_liquidity).toBe(LIQ);
+    expect(p.entry_score).toBeGreaterThan(0);
     expect(p.entry_network_fee_usd).toBeCloseTo(0.000505 * SOL);
     expect(p.dex_id).toBe("raydium");
     expect(q("SELECT cash_usd FROM wallet").cash_usd).toBeCloseTo(1000 - buy.cashOut);
@@ -62,7 +70,7 @@ describe("runTick end-to-end (SQLite-backed D1 shim)", () => {
     expect(p.status).toBe("closed");
     expect(p.close_reason).toMatch(/^take_profit/);
     expect(p.exit_signal_price).toBeCloseTo(signal, 12);
-    const sold = simulateSell({ quantity: buy.quantity, size_usd: 20, entry_fee_usd: buy.cashOut - 20 }, { ...m1, price }, CONFIG.costs);
+    const sold = simulateSell({ quantity: buy.quantity, size_usd: size, entry_fee_usd: buy.cashOut - size }, { ...m1, price }, CONFIG.costs);
     expect(p.realized_pnl).toBeCloseTo(sold.pnlUsd, 9);
     const t = q("SELECT * FROM trades WHERE side='sell'");
     expect(t.pnl_usd).toBeCloseTo(sold.pnlUsd, 9);

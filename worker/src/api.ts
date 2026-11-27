@@ -13,7 +13,7 @@ import type { Env } from "./types";
 //   GET  /api/equity       equity curve (downsampled)
 //   POST /api/run          run one tick now          (Bearer ADMIN_TOKEN)
 //   POST /api/pause|resume pause / resume ticking    (Bearer ADMIN_TOKEN)
-//   POST /api/reset        wipe and restart at $1000 (Bearer ADMIN_TOKEN)
+//   POST /api/reset        wipe history, restart at {startingEquity} (default CONFIG), keep ticking (Bearer ADMIN_TOKEN)
 
 /**
  * CORS origin to send back. ALLOWED_ORIGIN is "*" or a comma-separated
@@ -144,7 +144,17 @@ export async function handleApi(req: Request, env: Env): Promise<Response> {
         case "/api/resume":
           return json(await (await stub.fetch("https://do/resume")).json());
         case "/api/reset": {
-          const start = CONFIG.wallet.startingEquityUsd;
+          // Optional JSON body {startingEquity}: 100 .. 1,000,000 USD. Wipes all
+          // history (cannot be undone) and keeps the 45s loop running.
+          let start = CONFIG.wallet.startingEquityUsd;
+          const body = (await req.json().catch(() => null)) as { startingEquity?: unknown } | null;
+          if (body && body.startingEquity !== undefined) {
+            const n = Number(body.startingEquity);
+            if (!Number.isFinite(n) || n < 100 || n > 1_000_000) {
+              return json({ error: "startingEquity must be a number from 100 to 1,000,000" }, 400);
+            }
+            start = Math.round(n * 100) / 100;
+          }
           await db.batch([
             db.prepare("DELETE FROM positions"),
             db.prepare("DELETE FROM trades"),
@@ -155,7 +165,9 @@ export async function handleApi(req: Request, env: Env): Promise<Response> {
             db.prepare("DELETE FROM pending_orders"),
             db.prepare("UPDATE wallet SET cash_usd=?, cash_sol=0, equity_usd=?, starting_equity=?, updated_at=? WHERE id=1").bind(start, start, start, Date.now()),
           ]);
-          return json({ reset: true, startingEquity: start });
+          // Make sure tracking continues: unpause and arm the alarm (first tick in ~1s).
+          const scheduler = (await (await stub.fetch("https://do/resume")).json()) as { paused: boolean };
+          return json({ reset: true, startingEquity: start, paused: scheduler.paused });
         }
       }
     }

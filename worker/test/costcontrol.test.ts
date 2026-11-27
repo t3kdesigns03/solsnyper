@@ -16,15 +16,15 @@ describe("cost-aware entry rules", () => {
   it("rejects a pool whose round trip costs more than maxRoundTripCostPct", () => {
     const thin = snap({ dexId: "pumpfun", liquidityUsd: 25_000 }); // ~3.6% round trip
     expect(poolRoundTripCostPct(thin, CONFIG, SOL)).toBeGreaterThan(0.03);
-    const r = evaluateEntry(thin, ctx());
+    const r = evaluateEntry(thin, ctx({ cfg: withCC({ skipBondingCurves: false }) }));
     expect(r.rule).toBe("round_trip_cost");
-    expect(r.reason).toMatch(/^round trip costs 3\.\d% > 3\.0% max$/);
-    expect(evaluateEntry(snap({ dexId: "raydium", liquidityUsd: 25_000 }), ctx()).passed).toBe(true); // ~2.2%
+    expect(r.reason).toMatch(/^round trip costs \d+\.\d% > 3\.0% max$/);
+    expect(evaluateEntry(snap({ dexId: "raydium", liquidityUsd: 60_000 }), ctx()).passed).toBe(true); // ~2.3% at $100
   });
 
   it("rejects when take-profit is less than minEdgeMultiple x round-trip cost", () => {
     const cfg = withCC({ minEdgeMultiple: 2 }, { exits: { ...CONFIG.exits, takeProfitPct: 0.04 } });
-    const r = evaluateEntry(snap({ dexId: "raydium", liquidityUsd: 25_000 }), ctx({ cfg }));
+    const r = evaluateEntry(snap({ dexId: "raydium", liquidityUsd: 60_000 }), ctx({ cfg }));
     expect(r.rule).toBe("round_trip_cost");
     expect(r.reason).toMatch(/take-profit 4% < 2x round trip cost/);
   });
@@ -35,10 +35,12 @@ describe("cost-aware entry rules", () => {
 
   it("can skip pump.fun bonding-curve pools entirely, even with a looser cost cap", () => {
     const deep = snap({ dexId: "pumpfun", liquidityUsd: 500_000 });
-    const loose = withCC({ maxRoundTripCostPct: 0.05 });
+    const noCeiling = { ...CONFIG.filters, maxLiquidityUsd: 0 };
+    const loose = withCC({ maxRoundTripCostPct: 0.05, skipBondingCurves: false }, { filters: noCeiling });
     expect(evaluateEntry(deep, ctx({ cfg: loose })).passed).toBe(true);
-    expect(evaluateEntry(deep, ctx({ cfg: withCC({ maxRoundTripCostPct: 0.05, skipPumpFunCurve: true }) })).rule).toBe("pumpfun_curve");
-    expect(evaluateEntry(snap({ dexId: "pumpswap" }), ctx({ cfg: withCC({ skipPumpFunCurve: true }) })).passed).toBe(true);
+    expect(evaluateEntry(deep, ctx({ cfg: withCC({ maxRoundTripCostPct: 0.05, skipBondingCurves: true }, { filters: noCeiling }) })).rule).toBe("bonding_curve");
+    expect(evaluateEntry(snap({ dexId: "meteoradbc" }), ctx()).rule).toBe("bonding_curve"); // on by default
+    expect(evaluateEntry(snap({ dexId: "pumpswap" }), ctx({ cfg: withCC({ skipBondingCurves: true }) })).passed).toBe(true);
   });
 
   it("skips a relaunch: same symbol bought recently under another mint", () => {
@@ -74,13 +76,24 @@ describe("cost-aware sizing of activity", () => {
 
   it("cancels a pending buy if the pool was drained before the fill", () => {
     const mint = snap().mint;
-    const order: PendingOrder = { id: 3, side: "buy", mint, symbol: "GOOD", position_id: null, signal_price: 0.001, signal_time: T0, reason: "score 70", score: 70, ticks_waited: 0 };
+    const order: PendingOrder = { id: 3, side: "buy", mint, symbol: "GOOD", position_id: null, signal_price: 0.001, signal_time: T0, reason: "score 70", score: 70, ticks_waited: 0, signal_liquidity: 50_000 };
     const drained = snap({ liquidityUsd: 4 });
     const plan = planTick(base({ now: T0 + 45_000, pending: [order], snapshots: new Map([[mint, drained]]) }));
     expect(plan.buys).toHaveLength(0);
     expect(plan.closedOrders[0]).toMatchObject({ id: 3, outcome: "cancelled" });
-    expect(plan.decisions[0].reason).toMatch(/pool too thin at fill/);
+    expect(plan.decisions[0].reason).toMatch(/liquidity fell 100% since the signal/);
     expect(plan.cashAfter).toBe(1000);
+  });
+
+  it("cancels on a partial liquidity pull, and on a thin pool even without a recorded signal liquidity", () => {
+    const mint = snap().mint;
+    const order = (sl: number | null): PendingOrder => ({ id: 4, side: "buy", mint, symbol: "GOOD", position_id: null, signal_price: 0.001, signal_time: T0, reason: "score 70", score: 70, ticks_waited: 0, signal_liquidity: sl });
+    const pulled = planTick(base({ now: T0 + 45_000, pending: [order(60_000)], snapshots: new Map([[mint, snap({ liquidityUsd: 36_000 })]]) }));
+    expect(pulled.decisions[0].reason).toMatch(/liquidity fell 40% since the signal/);
+    const fine = planTick(base({ now: T0 + 45_000, pending: [order(60_000)], snapshots: new Map([[mint, snap({ liquidityUsd: 55_000 })]]) }));
+    expect(fine.buys).toHaveLength(1);
+    const thin = planTick(base({ now: T0 + 45_000, pending: [order(null)], snapshots: new Map([[mint, snap({ liquidityUsd: 4 })]]) }));
+    expect(thin.decisions[0].reason).toMatch(/pool too thin at fill/);
   });
 });
 

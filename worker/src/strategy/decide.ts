@@ -2,7 +2,7 @@ import type { Config } from "../config";
 import type { DiscoveredMint, MarketSnapshot, OpenPosition, PendingOrder } from "../types";
 import { type BuyFill, type MarketAtFill, markToMarket, type SellFill, simulateBuy, simulateSell, txFeeSol } from "./broker";
 import { evaluateExit } from "./exits";
-import { evaluateEntry, poolRoundTripCostPct } from "./filters";
+import { evaluateEntry, poolRoundTripCostPct, tradeSizeUsd } from "./filters";
 import { scoreCandidate } from "./scoring";
 
 // The whole trading brain for one tick, as a PURE function:
@@ -31,6 +31,8 @@ export interface TickInput {
 
 export interface PlannedBuy {
   snap: MarketSnapshot;
+  sizeUsd: number; // USD sent into the swap (network fee extra)
+  signalLiquidity: number | null; // pool liquidity when the buy was decided
   score: number | null;
   fill: BuyFill;
   signalPrice: number; // price when the buy was decided
@@ -168,7 +170,7 @@ export function planTick(input: TickInput): TickPlan {
       if (exit) {
         newOrders.push({
           side: "sell", mint: pos.mint, symbol: pos.symbol, position_id: pos.id, signal_price: lastPrice,
-          signal_time: now, reason: `${exit.rule}: ${exit.reason}`, score: null, ticks_waited: 0,
+          signal_time: now, reason: `${exit.rule}: ${exit.reason}`, score: null, ticks_waited: 0, signal_liquidity: null,
         });
         decisions.push({ mint: pos.mint, action: "order", reason: `sell order (${exit.rule}: ${exit.reason}) · fills next tick`, score: null });
       }
@@ -190,7 +192,8 @@ export function planTick(input: TickInput): TickPlan {
   const held = new Set(stillOpen.map((o) => o.pos.mint));
   let slots = cfg.wallet.maxOpenPositions - stillOpen.length;
   let reserved = 0; // cash earmarked for buy orders that haven't filled yet
-  const estCashOut = cfg.wallet.buySizeUsd + txFeeSol(costs) * sol;
+  const gasUsd = txFeeSol(costs) * sol;
+  const estCashOut = Math.max(cfg.wallet.buySizeUsd, cfg.wallet.maxBuySizeUsd) + gasUsd; // conservative reserve per waiting order
   const maxRt = cfg.costControl.maxRoundTripCostPct;
 
   for (const o of pending.filter((p) => p.side === "buy")) {
@@ -210,9 +213,13 @@ export function planTick(input: TickInput): TickPlan {
       // Re-check the pool before filling: if it thinned out or was drained since
       // the signal, a real bot would see a terrible quote and not send the swap.
       const rt = poolRoundTripCostPct(snap, cfg, sol);
-      if (rt > maxRt) cancel = `pool too thin at fill: round trip ${(rt * 100).toFixed(1)}% > ${(maxRt * 100).toFixed(1)}% (liquidity ${Math.round(snap.liquidityUsd).toLocaleString("en-US")})`;
+      const drop = o.signal_liquidity && o.signal_liquidity > 0 ? 1 - snap.liquidityUsd / o.signal_liquidity : 0;
+      if (drop > cfg.costControl.maxLiquidityDropAtFillPct)
+        cancel = `liquidity fell ${(drop * 100).toFixed(0)}% since the signal (${Math.round(o.signal_liquidity!).toLocaleString("en-US")} -> ${Math.round(snap.liquidityUsd).toLocaleString("en-US")})`;
+      else if (rt > maxRt) cancel = `pool too thin at fill: round trip ${(rt * 100).toFixed(1)}% > ${(maxRt * 100).toFixed(1)}% (liquidity ${Math.round(snap.liquidityUsd).toLocaleString("en-US")})`;
     }
-    const fill = snap && !cancel ? simulateBuy(cfg.wallet.buySizeUsd, { price: snap.priceUsd, liquidityUsd: snap.liquidityUsd, dexId: snap.dexId, solPriceUsd: sol }, costs) : null;
+    const size = snap && !cancel ? tradeSizeUsd(snap, cfg, sol) : cfg.wallet.buySizeUsd;
+    const fill = snap && !cancel ? simulateBuy(size, { price: snap.priceUsd, liquidityUsd: snap.liquidityUsd, dexId: snap.dexId, solPriceUsd: sol }, costs) : null;
     if (fill && cash < fill.cashOut) cancel = `insufficient cash ($${cash.toFixed(2)})`;
     if (cancel || !snap || !fill) {
       closedOrders.push({ id: o.id, outcome: "cancelled", note: cancel ?? "no fill" });
@@ -223,12 +230,12 @@ export function planTick(input: TickInput): TickPlan {
     slots -= 1;
     held.add(o.mint);
     recentlyTraded.set(o.mint, now);
-    buys.push({ snap, score: o.score, fill, signalPrice: o.signal_price, reason: o.reason });
+    buys.push({ snap, sizeUsd: size, signalLiquidity: o.signal_liquidity, score: o.score, fill, signalPrice: o.signal_price, reason: o.reason });
     closedOrders.push({ id: o.id, outcome: "filled", note: "" });
     decisions.push({
       mint: o.mint,
       action: "buy",
-      reason: `filled $${cfg.wallet.buySizeUsd} buy @ ${fill.fillPrice.toPrecision(4)} (${pctMove(fill.fillPrice, o.signal_price)} vs signal ${o.signal_price.toPrecision(4)}) · costs $${fill.costs.totalUsd.toFixed(2)}`,
+      reason: `filled ${size} buy @ ${fill.fillPrice.toPrecision(4)} (${pctMove(fill.fillPrice, o.signal_price)} vs signal ${o.signal_price.toPrecision(4)}) · costs $${fill.costs.totalUsd.toFixed(2)}`,
       score: o.score,
     });
   }
@@ -254,7 +261,11 @@ export function planTick(input: TickInput): TickPlan {
     const score = scoreCandidate(snap);
     const row: CandidateRow = { mint: d.mint, symbol: snap.symbol, source: d.source, snap, passed: res.passed, reason: res.reason, score };
     candidates.push(row);
-    if (res.passed) passed.push({ row, snap, score });
+    if (res.passed && cfg.filters.minScore > 0 && score < cfg.filters.minScore) {
+      row.passed = false;
+      row.reason = `score ${score} < ${cfg.filters.minScore}`;
+    }
+    if (row.passed) passed.push({ row, snap, score });
   }
 
   // Rank survivors; ties broken by mint for determinism.
@@ -265,7 +276,8 @@ export function planTick(input: TickInput): TickPlan {
 
   for (const c of passed) {
     const m: MarketAtFill = { price: c.snap.priceUsd, liquidityUsd: c.snap.liquidityUsd, dexId: c.snap.dexId, solPriceUsd: sol };
-    const fill = simulateBuy(cfg.wallet.buySizeUsd, m, costs);
+    const size = tradeSizeUsd(c.snap, cfg, sol);
+    const fill = simulateBuy(size, m, costs);
     let skip: string | null = null;
     if (signals >= cfg.wallet.maxBuysPerTick) skip = `max ${cfg.wallet.maxBuysPerTick} buys per tick`;
     else if (slots <= 0) skip = `max ${cfg.wallet.maxOpenPositions} open positions`;
@@ -287,17 +299,17 @@ export function planTick(input: TickInput): TickPlan {
     if (delay === 0) {
       cash -= fill.cashOut;
       recentlyTraded.set(c.snap.mint, now);
-      buys.push({ snap: c.snap, score: c.score, fill, signalPrice: c.snap.priceUsd, reason: why });
+      buys.push({ snap: c.snap, sizeUsd: size, signalLiquidity: c.snap.liquidityUsd, score: c.score, fill, signalPrice: c.snap.priceUsd, reason: why });
       c.row.reason = "bought";
-      decisions.push({ mint: c.snap.mint, action: "buy", reason: `passed all filters, $${cfg.wallet.buySizeUsd} buy @ ${fill.fillPrice.toPrecision(4)} · costs $${fill.costs.totalUsd.toFixed(2)}`, score: c.score });
+      decisions.push({ mint: c.snap.mint, action: "buy", reason: `passed all filters, ${size} buy @ ${fill.fillPrice.toPrecision(4)} · costs $${fill.costs.totalUsd.toFixed(2)}`, score: c.score });
     } else {
       reserved += fill.cashOut;
       newOrders.push({
         side: "buy", mint: c.snap.mint, symbol: c.snap.symbol, position_id: null, signal_price: c.snap.priceUsd,
-        signal_time: now, reason: why, score: c.score, ticks_waited: 0,
+        signal_time: now, reason: why, score: c.score, ticks_waited: 0, signal_liquidity: c.snap.liquidityUsd,
       });
       c.row.reason = delay === 1 ? "buy order placed (fills next tick)" : `buy order placed (fills in ${delay} ticks)`;
-      decisions.push({ mint: c.snap.mint, action: "order", reason: `passed all filters, $${cfg.wallet.buySizeUsd} buy order @ signal ${c.snap.priceUsd.toPrecision(4)}`, score: c.score });
+      decisions.push({ mint: c.snap.mint, action: "order", reason: `passed all filters, ~${size} buy order @ signal ${c.snap.priceUsd.toPrecision(4)}`, score: c.score });
     }
   }
 
@@ -310,7 +322,7 @@ export function planTick(input: TickInput): TickPlan {
   for (const o of stillOpen) equity += markToMarket(o.pos, o.m, costs).valueUsd;
   for (const b of buys) {
     const m: MarketAtFill = { price: b.snap.priceUsd, liquidityUsd: b.snap.liquidityUsd, dexId: b.snap.dexId, solPriceUsd: sol };
-    equity += markToMarket({ quantity: b.fill.quantity, size_usd: cfg.wallet.buySizeUsd, entry_fee_usd: b.fill.cashOut - cfg.wallet.buySizeUsd }, m, costs).valueUsd;
+    equity += markToMarket({ quantity: b.fill.quantity, size_usd: b.sizeUsd, entry_fee_usd: b.fill.cashOut - b.sizeUsd }, m, costs).valueUsd;
   }
 
   return {

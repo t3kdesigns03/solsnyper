@@ -7,8 +7,14 @@ export const CONFIG = {
   tickIntervalMs: 45_000, // how often the bot looks at the market (Durable Object alarm)
 
   wallet: {
-    startingEquityUsd: 1000, // paper bankroll after /api/reset
-    buySizeUsd: 20, // USD sent into each buy swap (network fee is extra)
+    startingEquityUsd: 10_000, // paper bankroll after /api/reset (the dashboard can pass its own)
+    // Trade size. Every buy is at least buySizeUsd (network fee extra). In deep
+    // pools it scales up toward maxBuySizeUsd, but never above maxPoolSharePct of
+    // the pool's liquidity and only while the round trip stays under
+    // costControl.maxRoundTripCostPct. Set maxBuySizeUsd = buySizeUsd for fixed size.
+    buySizeUsd: 100,
+    maxBuySizeUsd: 250,
+    maxPoolSharePct: 0.005, // 0.5% of liquidity: $250 needs a $50k+ pool
     maxOpenPositions: 10, // never hold more than this many tokens at once
     maxBuysPerTick: 3, // at most this many new buys per tick (best scores first)
   },
@@ -62,10 +68,13 @@ export const CONFIG = {
     // Skip a buy unless takeProfitPct is at least this many times the pool's
     // round-trip cost, so a winning trade isn't mostly eaten by costs.
     minEdgeMultiple: 2,
-    // pump.fun bonding-curve pools charge 1% each way (dexId "pumpfun").
-    // Off by default: with a 3% cap they're already excluded (2% fees + 1%
-    // slippage buffer > 3% at any liquidity). Turn on if you raise the cap.
-    skipPumpFunCurve: false,
+    // Skip bonding-curve pools (pump.fun curve "pumpfun"/"pump-fun", Meteora DBC
+    // "meteoradbc"): pre-migration tokens. Both such trades in the first live
+    // hours were rugs; pump.fun's 1% fee each way is also the most expensive.
+    skipBondingCurves: true,
+    // Cancel a delayed buy if the pool's liquidity fell more than this share
+    // between the signal and the fill (liquidity being pulled = rug in progress).
+    maxLiquidityDropAtFillPct: 0.3,
     // Max buys (fills + orders placed) in any rolling 60 minutes. The first
     // live hour after the cost model went live had ~50 buys/hour.
     maxBuysPerHour: 12,
@@ -79,6 +88,12 @@ export const CONFIG = {
   filters: {
     maxAgeMinutes: 60, // only buy pools younger than this ("very new")
     minLiquidityUsd: 20_000, // skip thin pools (high slippage, easy to rug)
+    // Skip brand-new pools with MORE than this: in the first live hours, 4 of 6
+    // trades in $80k+ pools were rugs (creator-seeded liquidity that got pulled). 0 = off.
+    maxLiquidityUsd: 80_000,
+    // Minimum candidate score (0-100, see scoring.ts). Below 50, 5 of 6 live
+    // trades were rugs. 0 = off.
+    minScore: 50,
     minVolumeH1Usd: 5_000, // needs real trading in the last hour
     minTxnsH1: 30, // needs real activity, not one whale
     minSellsH1: 3, // honeypot hint: lots of buys, nobody can sell

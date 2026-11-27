@@ -244,22 +244,24 @@ function buildWrites(
     );
   }
 
-  const size = cfg.wallet.buySizeUsd;
   for (const b of plan.buys) {
     const s = b.snap;
     const f = b.fill;
+    const size = b.sizeUsd;
     // entry_fee_usd = cash spent beyond size_usd (the network fee). The DEX fee
     // and slippage are already "inside" the smaller token quantity.
     w.push(
       db
         .prepare(
           `INSERT INTO positions (mint, symbol, pair_address, dex_id, entry_price, entry_signal_price, entry_time, size_usd, quantity, entry_fee_usd,
-             entry_dex_fee_usd, entry_network_fee_usd, entry_slippage_usd, entry_liquidity, current_price, current_liquidity, peak_price, unrealized_pnl, last_update, status)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open')`,
+             entry_dex_fee_usd, entry_network_fee_usd, entry_slippage_usd, entry_liquidity, current_price, current_liquidity, peak_price, unrealized_pnl, last_update, status,
+             entry_score, entry_signal_liquidity, entry_age_minutes, entry_fdv_usd, entry_volume_h1_usd, entry_buys_h1, entry_sells_h1, entry_change_m5_pct, entry_change_h1_pct)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?)`,
         )
         .bind(
           s.mint, s.symbol, s.pairAddress, s.dexId, f.fillPrice, b.signalPrice, now, size, f.quantity, f.cashOut - size,
           f.costs.dexFeeUsd, f.costs.networkFeeUsd, f.costs.slippageUsd, s.liquidityUsd, s.priceUsd, s.liquidityUsd, f.fillPrice, -f.costs.totalUsd, now,
+          b.score, b.signalLiquidity, s.ageMinutes, s.fdvUsd, s.volumeH1Usd, s.txnsH1.buys, s.txnsH1.sells, s.priceChangeM5Pct, s.priceChangeH1Pct,
         ),
       db
         .prepare(
@@ -279,8 +281,8 @@ function buildWrites(
   for (const o of plan.newOrders) {
     w.push(
       db
-        .prepare(`INSERT INTO pending_orders (side, mint, symbol, position_id, signal_price, signal_time, reason, score, ticks_waited) VALUES (?,?,?,?,?,?,?,?,0)`)
-        .bind(o.side, o.mint, o.symbol, o.position_id, o.signal_price, o.signal_time, o.reason, o.score),
+        .prepare(`INSERT INTO pending_orders (side, mint, symbol, position_id, signal_price, signal_time, reason, score, ticks_waited, signal_liquidity) VALUES (?,?,?,?,?,?,?,?,0,?)`)
+        .bind(o.side, o.mint, o.symbol, o.position_id, o.signal_price, o.signal_time, o.reason, o.score, o.signal_liquidity),
     );
   }
 
