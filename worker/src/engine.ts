@@ -1,5 +1,6 @@
 import { CONFIG, type Config } from "./config";
 import { discoverDexScreener, fetchSnapshots, fetchSolPrice } from "./sources/dexscreener";
+import { discoverGeckoTerminal, fetchGeckoSnapshots } from "./sources/geckoterminal";
 import { discoverPumpFun } from "./sources/pumpfun";
 import { planTick, type TickPlan } from "./strategy/decide";
 import type { DiscoveredMint, Env, MarketSnapshot, OpenPosition } from "./types";
@@ -9,14 +10,19 @@ import type { DiscoveredMint, Env, MarketSnapshot, OpenPosition } from "./types"
 
 export interface Sources {
   discover(env: Env): Promise<{ mints: DiscoveredMint[]; errors: string[] }>;
-  snapshots(mints: string[], now: number): Promise<Map<string, MarketSnapshot>>;
-  solPrice(now: number): Promise<number | null>;
+  snapshots(mints: string[], now: number, env?: Env): Promise<Map<string, MarketSnapshot>>;
+  solPrice(now: number, env?: Env): Promise<number | null>;
 }
+
+const on = (v: string | undefined) => v !== "false";
+const WSOL = "So11111111111111111111111111111111111111112";
 
 export const liveSources: Sources = {
   async discover(env) {
-    const jobs: [string, () => Promise<DiscoveredMint[]>][] = [["dexscreener", discoverDexScreener]];
-    if (env.ENABLE_PUMPFUN !== "false") jobs.push(["pumpfun", discoverPumpFun]);
+    const jobs: [string, () => Promise<DiscoveredMint[]>][] = [];
+    if (on(env.ENABLE_GECKOTERMINAL)) jobs.push(["geckoterminal", discoverGeckoTerminal]);
+    if (on(env.ENABLE_DEXSCREENER)) jobs.push(["dexscreener", discoverDexScreener]);
+    if (on(env.ENABLE_PUMPFUN)) jobs.push(["pumpfun", discoverPumpFun]);
     const res = await Promise.allSettled(jobs.map(([, fn]) => fn()));
     const mints: DiscoveredMint[] = [];
     const errors: string[] = [];
@@ -26,8 +32,42 @@ export const liveSources: Sources = {
     });
     return { mints, errors };
   },
-  snapshots: fetchSnapshots,
-  solPrice: fetchSolPrice,
+
+  // GeckoTerminal is the primary price source; DexScreener only fills in mints
+  // GeckoTerminal didn't return. Throws only if every enabled source failed.
+  async snapshots(mints, now, env) {
+    const out = new Map<string, MarketSnapshot>();
+    const errors: string[] = [];
+    if (on(env?.ENABLE_GECKOTERMINAL)) {
+      try {
+        for (const [k, v] of await fetchGeckoSnapshots(mints, now)) out.set(k, v);
+      } catch (e) {
+        errors.push(`geckoterminal: ${String(e)}`);
+      }
+    }
+    const missing = [...new Set(mints)].filter((m) => !out.has(m));
+    if (missing.length && on(env?.ENABLE_DEXSCREENER)) {
+      try {
+        for (const [k, v] of await fetchSnapshots(missing, now)) out.set(k, v);
+      } catch (e) {
+        errors.push(`dexscreener: ${String(e)}`);
+      }
+    }
+    if (out.size === 0 && errors.length && mints.length) throw new Error(errors.join("; "));
+    return out;
+  },
+
+  async solPrice(now, env) {
+    if (on(env?.ENABLE_GECKOTERMINAL)) {
+      try {
+        const p = (await fetchGeckoSnapshots([WSOL], now)).get(WSOL)?.priceUsd;
+        if (p) return p;
+      } catch {
+        /* fall through to DexScreener */
+      }
+    }
+    return on(env?.ENABLE_DEXSCREENER) ? fetchSolPrice(now) : null;
+  },
 };
 
 export interface TickSummary {
@@ -70,11 +110,11 @@ export async function runTick(env: Env, now = Date.now(), sources: Sources = liv
   errors.push(...disc.errors);
   let snapshots = new Map<string, MarketSnapshot>();
   try {
-    snapshots = await sources.snapshots([...open.map((p) => p.mint), ...disc.mints.map((d) => d.mint)], now);
+    snapshots = await sources.snapshots([...open.map((p) => p.mint), ...disc.mints.map((d) => d.mint)], now, env);
   } catch (e) {
     errors.push(`snapshots: ${String(e)}`);
   }
-  const solPrice = (await sources.solPrice(now)) ?? wallet.sol_price_usd;
+  const solPrice = (await sources.solPrice(now, env)) ?? wallet.sol_price_usd;
 
   // --- decide (pure)
   const plan = planTick({ now, cfg, cashUsd: wallet.cash_usd, open, discovered: disc.mints, snapshots, recentlyTraded });

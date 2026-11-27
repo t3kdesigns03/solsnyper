@@ -48,5 +48,7 @@ export interface Env {
   ADMIN_TOKEN?: string; // optional secret; required for POST /api/run and /api/reset
   ALLOWED_ORIGIN?: string; // CORS origin for the dashboard, "*" if unset
   ENABLE_PUMPFUN?: string; // "false" to disable the unofficial pump.fun source
+  ENABLE_GECKOTERMINAL?: string; // "false" to disable GeckoTerminal (primary price source)
+  ENABLE_DEXSCREENER?: string; // "false" to disable DexScreener (discovery + price fallback)
   MOCK_MARKET?: string; // "true" = offline fake market for local testing only
 }

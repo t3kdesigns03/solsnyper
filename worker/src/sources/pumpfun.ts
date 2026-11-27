@@ -4,12 +4,11 @@ import { getJson } from "./http";
 // GUESS / UNOFFICIAL: pump.fun has no documented public API. This is the
 // endpoint their own web app calls for "newest coins". It may change, rate
 // limit, or block requests from Cloudflare IPs at any time. It is fail-soft:
-// if it errors, the tick carries on with DexScreener alone and the error is
+// if it errors, the tick carries on with the other sources and the error is
 // recorded in the `runs` table. Disable with ENABLE_PUMPFUN="false".
 //
 // Pump.fun coins only give us a mint here; pricing and liquidity still come
-// from DexScreener (which indexes pump.fun bonding-curve pairs as dexId
-// "pumpfun"). Most brand-new pump.fun coins will fail the $20k liquidity
+// from GeckoTerminal / DexScreener (both index pump.fun bonding-curve pools). Most brand-new pump.fun coins will fail the $20k liquidity
 // filter, which is expected.
 
 const URL_NEWEST =

@@ -26,6 +26,10 @@ new_sqlite_classes = ["Scheduler"] # SQLite-backed DO: works on the Workers free
 ALLOWED_ORIGIN = "https://solsniperr.netlify.app"
 # Unofficial endpoint; set "false" if it starts failing or you don't want it.
 ENABLE_PUMPFUN = "true"
+# GeckoTerminal: new-pool discovery + primary price/liquidity source.
+ENABLE_GECKOTERMINAL = "true"
+# DexScreener: discovery feeds + price fallback for mints GeckoTerminal misses.
+ENABLE_DEXSCREENER = "true"
 
 # Secrets (not in this file):
 #   wrangler secret put ADMIN_TOKEN     # enables POST /api/run, /pause, /resume, /reset
