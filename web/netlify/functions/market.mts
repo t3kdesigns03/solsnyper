@@ -4,7 +4,8 @@
 // the Worker calls this function (running on Netlify/AWS) once per tick.
 // Auth: header `x-relay-token` must equal the RELAY_TOKEN env var.
 // The logic lives in the worker package so it is tested there; Netlify's
-// bundler pulls it in through this relative import.
+// bundler pulls it in through this relative import. Changes under worker/src
+// trigger a Netlify rebuild via the `ignore` rule in netlify.toml.
 import { buildMarketResponse, parseRelayRequest } from "../../../worker/src/relay/core";
 
 declare const process: { env: Record<string, string | undefined> };

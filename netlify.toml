@@ -6,6 +6,10 @@
   base = "web"
   command = "npm ci && npm run build"
   publish = "out"
+  # Netlify skips a build when nothing under the base directory changed, but the
+  # relay function (web/netlify/functions/market.mts) imports its logic from
+  # worker/src. Rebuild when either changed. Runs from web/; exit 0 = skip.
+  ignore = "git diff --quiet $CACHED_COMMIT_REF $COMMIT_REF -- . ../worker/src ../netlify.toml"
 
 [build.environment]
   NODE_VERSION = "20"
