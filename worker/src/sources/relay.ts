@@ -8,12 +8,12 @@ export async function callRelay(
   url: string,
   token: string,
   mints: string[],
-  opts: { dexscreener?: boolean; timeoutMs?: number } = {},
+  opts: { dexscreener?: boolean; timeoutMs?: number; riskMints?: string[] } = {},
 ): Promise<RelayResponse> {
   const res = await fetch(url, {
     method: "POST",
     headers: { "content-type": "application/json", accept: "application/json", "x-relay-token": token },
-    body: JSON.stringify({ mints: [...new Set(mints)], dexscreener: opts.dexscreener !== false }),
+    body: JSON.stringify({ mints: [...new Set(mints)], dexscreener: opts.dexscreener !== false, riskMints: opts.riskMints ?? [] }),
     signal: AbortSignal.timeout(opts.timeoutMs ?? 15_000),
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} from relay`);
@@ -24,6 +24,7 @@ export async function callRelay(
     established: (Array.isArray(body.established) ? body.established : []).filter((d): d is DiscoveredMint => typeof d?.mint === "string" && typeof d?.source === "string"),
     snapshots: body.snapshots.filter((s): s is MarketSnapshot => typeof s?.mint === "string" && typeof s?.priceUsd === "number"),
     solPriceUsd: typeof body.solPriceUsd === "number" ? body.solPriceUsd : null,
+    risk: body.risk && typeof body.risk === "object" ? body.risk : {},
     errors: Array.isArray(body.errors) ? body.errors.map(String) : [],
   };
 }

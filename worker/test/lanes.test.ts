@@ -197,3 +197,18 @@ describe("lane-aware API", () => {
     expect((await get("/api/positions?lane=bogus")).status).toBe(400);
   });
 });
+
+describe("held positions ignore a different, much thinner pool", () => {
+  it("treats a dead duplicate pool's price as a missed update, but not a rug in our own pool", async () => {
+    const { planTick } = await import("../src/strategy/decide");
+    const p = pos({ pair_address: "OurPool", current_liquidity: 140_000, entry_liquidity: 140_000, mint: "Zoth1111111111111111111111111111111111111" });
+    const dead = snap({ mint: p.mint, pairAddress: "DeadPool", liquidityUsd: 0, priceUsd: 1e-9 });
+    const plan = (s: MarketSnapshot) =>
+      planTick({ now: T0 + 60_000, cfg: CONFIG, cashUsd: 1000, solPriceUsd: SOL, open: [p], pending: [], discovered: [], snapshots: new Map([[p.mint, s]]), recentlyTraded: new Map() });
+    const a = plan(dead);
+    expect(a.newOrders).toHaveLength(0); // no exit from the bogus price
+    expect(a.updates[0].missedUpdates).toBe(1);
+    const rugged = snap({ mint: p.mint, pairAddress: "OurPool", liquidityUsd: 100, priceUsd: 0.01 });
+    expect(plan(rugged).newOrders[0]).toMatchObject({ side: "sell" });
+  });
+});

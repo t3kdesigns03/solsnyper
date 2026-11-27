@@ -17,6 +17,12 @@ migrations_dir = "migrations"
 [durable_objects]
 bindings = [{ name = "SCHEDULER", class_name = "Scheduler" }]
 
+# The scheduler calls this Worker to run each tick, so ticks always use the
+# latest deployed code (a Durable Object instance can outlive a deploy).
+[[services]]
+binding = "SELF"
+service = "solsnyper-worker"
+
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["Scheduler"] # SQLite-backed DO: works on the Workers free plan

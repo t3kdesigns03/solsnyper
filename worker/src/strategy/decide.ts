@@ -144,7 +144,14 @@ export function planTick(input: TickInput): TickPlan {
   }
 
   for (const pos of input.open) {
-    const snap = snapshots.get(pos.mint);
+    // A token can trade in several pools. If the feed hands us a DIFFERENT pool
+    // than the one we bought in and it's much thinner (e.g. a dead duplicate
+    // pool with a stale near-zero price), don't let it trigger exits: treat it
+    // as a missed price update. A real rug in our own pool still counts.
+    const raw = snapshots.get(pos.mint);
+    const lastLiq = pos.current_liquidity ?? pos.entry_liquidity;
+    const otherPool = !!raw && !!pos.pair_address && !!raw.pairAddress && raw.pairAddress !== pos.pair_address;
+    const snap = otherPool && raw!.liquidityUsd < lastLiq * 0.5 ? undefined : raw;
     const price = snap && snap.priceUsd > 0 ? snap.priceUsd : null;
     const lastPrice = price ?? pos.current_price;
     const m = marketFor(pos, snap, lastPrice);

@@ -30,7 +30,7 @@ export interface GeckoPool {
     market_cap_usd?: string | null;
     reserve_in_usd?: string | null;
     price_change_percentage?: Partial<Record<Window, string | null>>;
-    transactions?: Partial<Record<Window, { buys?: number; sells?: number }>>;
+    transactions?: Partial<Record<Window, { buys?: number; sells?: number; buyers?: number; sellers?: number }>>;
     volume_usd?: Partial<Record<Window, string | null>>;
   };
   relationships?: { base_token?: Rel; quote_token?: Rel; dex?: Rel };
@@ -119,6 +119,11 @@ export function geckoToSnapshot(p: GeckoPool, t: GeckoToken, now: number): Marke
     volumeH1Usd: num(a.volume_usd?.h1),
     volumeM5Usd: num(a.volume_usd?.m5),
     volumeH24Usd: num(a.volume_usd?.h24),
+    volumeH6Usd: num(a.volume_usd?.h6),
+    priceChangeH6Pct: isBase ? numOrNull(a.price_change_percentage?.h6) : null,
+    priceChangeH24Pct: isBase ? numOrNull(a.price_change_percentage?.h24) : null,
+    buyersH1: num(a.transactions?.h1?.buyers),
+    sellersH1: num(a.transactions?.h1?.sellers),
     txnsH1: tx("h1"),
     txnsM5: tx("m5"),
     priceChangeM5Pct: isBase ? numOrNull(a.price_change_percentage?.m5) : null,

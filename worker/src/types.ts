@@ -12,6 +12,12 @@ export interface MarketSnapshot {
   volumeH1Usd: number;
   volumeM5Usd: number;
   volumeH24Usd?: number; // 24h volume, when the source provides it
+  // Extra features recorded for analysis (optional: not every source has them)
+  volumeH6Usd?: number;
+  priceChangeH6Pct?: number | null;
+  priceChangeH24Pct?: number | null;
+  buyersH1?: number; // unique buyer wallets in the last hour (GeckoTerminal)
+  sellersH1?: number;
   txnsH1: { buys: number; sells: number };
   txnsM5: { buys: number; sells: number };
   priceChangeM5Pct: number | null;
@@ -37,6 +43,7 @@ export interface OpenPosition {
   quantity: number;
   entry_fee_usd: number; // cash spent beyond size_usd on entry (the buy's network fee)
   dex_id: string | null;
+  pair_address?: string | null; // the pool we bought in
   entry_liquidity: number;
   current_price: number;
   current_liquidity: number | null;
@@ -62,6 +69,7 @@ export interface PendingOrder {
 export interface Env {
   DB: D1Database;
   SCHEDULER: DurableObjectNamespace;
+  SELF?: Fetcher; // service binding to this Worker: the scheduler runs ticks through it
   ADMIN_TOKEN?: string; // optional secret; required for POST /api/run and /api/reset
   ALLOWED_ORIGIN?: string; // dashboard origins: "*" or comma-separated list ("*" if unset)
   ENABLE_PUMPFUN?: string; // "false" to disable the unofficial pump.fun source

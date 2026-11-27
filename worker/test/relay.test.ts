@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { liveSources } from "../src/engine";
-import { buildMarketResponse, parseRelayRequest, trimSnapshot, WSOL } from "../src/relay/core";
+import { buildMarketResponse, MAX_MINTS, MAX_RISK_MINTS, parseRelayRequest, trimSnapshot, WSOL } from "../src/relay/core";
 import { callRelay } from "../src/sources/relay";
 import type { Env } from "../src/types";
 import relayFunction from "../../web/netlify/functions/market.mts";
@@ -56,10 +56,12 @@ describe("relay core", () => {
   it("validates and caps the request", () => {
     expect(parseRelayRequest(null)).toBeNull();
     expect(parseRelayRequest({ mints: "x" })).toBeNull();
-    const r = parseRelayRequest({ mints: [MINT, MINT, "bad mint!", 5, ...Array.from({ length: 200 }, (_, i) => `${i}`.padStart(40, "A"))] })!;
+    const r = parseRelayRequest({ mints: [MINT, MINT, "bad mint!", 5, ...Array.from({ length: 400 }, (_, i) => `${i}`.padStart(40, "A"))] })!;
     expect(r.mints[0]).toBe(MINT);
     expect(r.mints).not.toContain("bad mint!");
-    expect(r.mints.length).toBe(150);
+    expect(r.mints.length).toBe(MAX_MINTS);
+    const withRisk = parseRelayRequest({ mints: [], riskMints: Array.from({ length: 20 }, (_, i) => `${i}`.padStart(40, "B")) })!;
+    expect(withRisk.riskMints).toHaveLength(MAX_RISK_MINTS);
     expect(r.dexscreener).toBe(true);
   });
 

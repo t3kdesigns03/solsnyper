@@ -128,11 +128,31 @@ export const CONFIG = {
     maxMissedUpdates: 4,
   },
 
+  // ── Feature store (data for prediction work) ───────────────────────────────
+  // Every sampleEveryMinutes, record the market features of each tracked coin
+  // (traded or not) in candidate_snapshots, and keep pricing it for
+  // trackMinutes after first sight so its outcome can be measured later.
+  // Rows/day ~= tracked coins per sample x (1440 / sampleEveryMinutes).
+  data: {
+    enabled: true,
+    sampleEveryMinutes: 3,
+    retentionDays: 7, // prune snapshots older than this
+    maxWatchlist: 150, // cap on coins priced purely for tracking, per sample
+    trackMinLiquidityUsd: 10_000, // sniper: track young pools with at least this
+    trackMaxAgeMinutes: 180, // sniper: ...and at most this old when first seen (0 = any)
+    trackMinutes: 70, // sniper: keep tracking for +5/+15/+60 min outcomes
+    riskLookupsPerTick: 8, // RugCheck lookups per tick (new watchlist coins; cached forever)
+  },
+
   retention: {
     decisionsDays: 3, // keep the decision log this long
     candidatesHours: 6, // keep the candidate feed this long
     // Only log a reject again if its reason changed (avoids ~100k identical rows/day).
     logUnchangedRejects: false,
+    // Write reduction: re-save a candidate row only when its verdict changes, price or
+    // liquidity moves by candidateChangePct, or every candidateRefreshMinutes.
+    candidateChangePct: 0.1,
+    candidateRefreshMinutes: 15,
   },
 };
 
@@ -191,6 +211,12 @@ export const STABLE_CONFIG: Config = {
     givebackFraction: 0.5, // ...exit once half the peak gain is gone
     maxHoldMinutes: 120, // 2h time stop
     liquidityCollapseFraction: 0.5,
+  },
+  data: {
+    ...CONFIG.data,
+    trackMinLiquidityUsd: 100_000, // the trending / top-volume set
+    trackMaxAgeMinutes: 0,
+    trackMinutes: 250, // +4h outcomes
   },
 };
 

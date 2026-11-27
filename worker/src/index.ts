@@ -18,11 +18,22 @@ export class Scheduler implements DurableObject {
   private running = false;
   constructor(private state: DurableObjectState, private env: Env) {}
 
-  /** In-memory lock so a manual /run-now can't interleave with an alarm tick. */
-  private async tickOnce() {
+  /**
+   * In-memory lock so a manual /run-now can't interleave with an alarm tick.
+   * The tick itself runs in the Worker (via the SELF service binding), not in
+   * this object: a Durable Object instance can keep running old code after a
+   * deploy, but a fresh Worker request always runs the latest version.
+   */
+  private async tickOnce(): Promise<unknown> {
     if (this.running) return { skipped: "tick already running" };
     this.running = true;
     try {
+      if (this.env.SELF) {
+        const res = await this.env.SELF.fetch("https://self" + TICK_PATH, { method: "POST", headers: { "x-tick-token": this.env.ADMIN_TOKEN ?? "" } });
+        const body = (await res.json()) as unknown;
+        if (!res.ok) throw new Error(`tick endpoint ${res.status}: ${JSON.stringify(body).slice(0, 300)}`);
+        return body;
+      }
       return await runTick(this.env, Date.now(), this.env.MOCK_MARKET === "true" ? mockSources : liveSources);
     } finally {
       this.running = false;
@@ -70,8 +81,19 @@ export class Scheduler implements DurableObject {
   }
 }
 
+/** Internal endpoint the scheduler calls through the SELF service binding. */
+export const TICK_PATH = "/__tick";
+
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
+    const url = new URL(req.url);
+    if (url.pathname === TICK_PATH) {
+      // Only the scheduler knows this token; the path is never meant for browsers.
+      if (req.method !== "POST" || !env.ADMIN_TOKEN || req.headers.get("x-tick-token") !== env.ADMIN_TOKEN) {
+        return Response.json({ error: "forbidden" }, { status: 403 });
+      }
+      return Response.json(await runTick(env, Date.now(), env.MOCK_MARKET === "true" ? mockSources : liveSources));
+    }
     return handleApi(req, env);
   },
 

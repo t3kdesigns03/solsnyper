@@ -3,6 +3,8 @@ import { discoverDexScreener, fetchSnapshots, fetchSolPrice } from "./sources/de
 import { discoverGeckoEstablished, discoverGeckoTerminal, fetchGeckoSnapshots } from "./sources/geckoterminal";
 import { discoverPumpFun } from "./sources/pumpfun";
 import { callRelay } from "./sources/relay";
+import { fetchRiskSummaries, type RiskSummary } from "./sources/rugcheck";
+import { buildFeatureWrites, planSampling } from "./featurestore";
 import { planTick, type TickPlan } from "./strategy/decide";
 import type { DiscoveredMint, Env, MarketSnapshot, OpenPosition, PendingOrder } from "./types";
 
@@ -16,7 +18,11 @@ export interface Sources {
   /** Optional: established pools (stable lane) with their snapshots. */
   established?(env: Env, now: number): Promise<{ mints: DiscoveredMint[]; snapshots: MarketSnapshot[]; errors: string[] }>;
   /** Optional one-shot fetch of discovery + prices (used for the Netlify relay). */
-  market?(env: Env, held: string[], now: number): Promise<MarketData>;
+  market?(env: Env, held: string[], now: number, opts?: MarketOpts): Promise<MarketData>;
+}
+
+export interface MarketOpts {
+  riskMints?: string[]; // mints to look up on RugCheck this tick (feature store)
 }
 
 export interface MarketData {
@@ -25,10 +31,11 @@ export interface MarketData {
   errors: string[];
   snapshots: Map<string, MarketSnapshot>;
   solPrice: number | null;
+  risk: Record<string, RiskSummary>; // RugCheck summaries fetched this tick
 }
 
 /** The plain path: discover, then price everything, then SOL. */
-async function fetchMarket(sources: Sources, env: Env, held: string[], now: number): Promise<MarketData> {
+async function fetchMarket(sources: Sources, env: Env, held: string[], now: number, opts: MarketOpts = {}): Promise<MarketData> {
   const disc = await sources.discover(env);
   const errors = [...disc.errors];
   let snapshots = new Map<string, MarketSnapshot>();
@@ -44,7 +51,13 @@ async function fetchMarket(sources: Sources, env: Env, held: string[], now: numb
     established = est.mints;
     for (const sn of est.snapshots) if (!snapshots.has(sn.mint)) snapshots.set(sn.mint, sn);
   }
-  return { mints: disc.mints, established, errors, snapshots, solPrice: await sources.solPrice(now, env) };
+  let risk: Record<string, RiskSummary> = {};
+  if (opts.riskMints?.length && sources === liveSources) {
+    const rc = await fetchRiskSummaries(opts.riskMints);
+    risk = rc.risk;
+    errors.push(...rc.errors);
+  }
+  return { mints: disc.mints, established, errors, snapshots, solPrice: await sources.solPrice(now, env), risk };
 }
 
 const on = (v: string | undefined) => v !== "false";
@@ -72,8 +85,8 @@ export const liveSources: Sources = {
   // Relay path: pump.fun direct (it works from Cloudflare), then ONE call to the
   // Netlify relay for GeckoTerminal/DexScreener discovery + prices. If the relay
   // is off, unconfigured or failing, fall back to direct calls.
-  async market(env, held, now) {
-    if (!on(env.ENABLE_RELAY) || !env.RELAY_URL || !env.RELAY_TOKEN) return fetchMarket(this, env, held, now);
+  async market(env, held, now, opts = {}) {
+    if (!on(env.ENABLE_RELAY) || !env.RELAY_URL || !env.RELAY_TOKEN) return fetchMarket(this, env, held, now, opts);
     const errors: string[] = [];
     let pump: DiscoveredMint[] = [];
     if (on(env.ENABLE_PUMPFUN)) {
@@ -86,6 +99,7 @@ export const liveSources: Sources = {
     try {
       const r = await callRelay(env.RELAY_URL, env.RELAY_TOKEN, [...held, ...pump.map((d) => d.mint)], {
         dexscreener: on(env.ENABLE_DEXSCREENER),
+        riskMints: opts.riskMints,
       });
       return {
         mints: [...pump, ...r.discovered],
@@ -93,10 +107,11 @@ export const liveSources: Sources = {
         errors: [...errors, ...r.errors.map((e) => `relay/${e}`)],
         snapshots: new Map(r.snapshots.map((s) => [s.mint, s])),
         solPrice: r.solPriceUsd,
+        risk: r.risk ?? {},
       };
     } catch (e) {
       errors.push(`relay: ${String(e)} (fell back to direct calls)`);
-      const direct = await fetchMarket({ ...this, discover: (en) => discoverDirect(en, false) }, env, held, now);
+      const direct = await fetchMarket({ ...this, discover: (en) => discoverDirect(en, false) }, env, held, now, opts);
       return { ...direct, mints: [...pump, ...direct.mints], errors: [...errors, ...direct.errors] };
     }
   },
@@ -219,18 +234,27 @@ export async function runTick(
   // --- load state for every lane
   const states = await Promise.all(active.map((l) => loadLane(db, l, lanes[l]!, now)));
   const retention = (lanes.sniper ?? CONFIG).retention;
-  const prevReasons = new Map(
+  const prevCandidates = new Map(
     (
       await db
-        .prepare("SELECT mint, reject_reason FROM candidates WHERE last_seen > ?")
+        .prepare("SELECT mint, lane, reject_reason, flagged, price, liquidity, last_seen FROM candidates WHERE last_seen > ?")
         .bind(now - retention.candidatesHours * 3_600_000)
-        .all<{ mint: string; reject_reason: string | null }>()
-    ).results.map((r) => [r.mint, r.reject_reason]),
+        .all<PrevCandidate>()
+    ).results.map((r) => [r.mint, r]),
   );
 
+  // --- feature store: is this a sample tick, which tracked coins to price, which need a risk lookup
+  const sampling = await planSampling(db, lanes.sniper ?? CONFIG, now);
+
   // --- ONE market fetch for all lanes (mints with a pending buy count as held, so they get priced)
-  const held = [...new Set(states.flatMap((s) => [...s.open.map((p) => p.mint), ...s.pending.filter((o) => o.side === "buy").map((o) => o.mint)]))];
-  const market = sources.market ? await sources.market(env, held, now) : await fetchMarket(sources, env, held, now);
+  const held = [
+    ...new Set([
+      ...states.flatMap((s) => [...s.open.map((p) => p.mint), ...s.pending.filter((o) => o.side === "buy").map((o) => o.mint)]),
+      ...sampling.watch.map((x) => x.mint),
+    ]),
+  ];
+  const opts = { riskMints: sampling.riskMints };
+  const market = sources.market ? await sources.market(env, held, now, opts) : await fetchMarket(sources, env, held, now, opts);
   errors.push(...market.errors);
   // SOL price: live, else last stored; planTick falls back to CONFIG if both are 0.
   const solPrice = market.solPrice ?? states[0]?.solPrice ?? 0;
@@ -238,15 +262,18 @@ export async function runTick(
   // --- decide (pure) per lane, then persist everything in one batch
   const writes: D1PreparedStatement[] = [];
   const summaries = {} as Record<Lane, LaneSummary>;
+  const laneCandidates: Parameters<typeof buildFeatureWrites>[3] = [];
   for (const st of states) {
     const plan = planTick({
       now, cfg: st.cfg, cashUsd: st.cashUsd, solPriceUsd: solPrice, open: st.open, pending: st.pending,
       discovered: st.lane === "stable" ? market.established : market.mints,
       snapshots: market.snapshots, recentlyTraded: st.recentlyTraded, recentSymbols: st.recentSymbols, buysLastHour: st.buysLastHour,
     });
-    writes.push(...buildWrites(db, st.lane, plan, now, solPrice, prevReasons, st.cfg, errors));
+    writes.push(...buildWrites(db, st.lane, plan, now, solPrice, prevCandidates, st.cfg, errors));
     summaries[st.lane] = { candidatesSeen: plan.candidates.length, buys: plan.buys.length, sells: plan.sells.length, equityUsd: plan.equityAfter };
+    laneCandidates.push({ lane: st.lane, cfg: st.cfg, candidates: plan.candidates });
   }
+  writes.push(...buildFeatureWrites(db, now, sampling, laneCandidates, market.snapshots, market.risk ?? {}));
   writes.push(
     db.prepare(`DELETE FROM decisions WHERE timestamp < ?`).bind(now - retention.decisionsDays * 86_400_000),
     db.prepare(`DELETE FROM candidates WHERE last_seen < ?`).bind(now - retention.candidatesHours * 3_600_000),
@@ -258,13 +285,39 @@ export async function runTick(
   return { startedAt: now, durationMs: Date.now() - now, ...sniper, errors, lanes: summaries };
 }
 
+interface PrevCandidate {
+  mint: string;
+  lane: string;
+  reject_reason: string | null;
+  flagged: number;
+  price: number | null;
+  liquidity: number | null;
+  last_seen: number;
+}
+
+/**
+ * Write reduction: a candidate row is re-saved only if it is new, its verdict
+ * changed, price or liquidity moved by retention.candidateChangePct, or it
+ * hasn't been refreshed for retention.candidateRefreshMinutes (keeps last_seen
+ * fresh enough for the feed and the 6h retention window).
+ */
+function candidateChanged(prev: PrevCandidate | undefined, c: TickPlan["candidates"][number], lane: Lane, now: number, cfg: Config): boolean {
+  if (!prev || prev.lane !== lane) return true;
+  const reason = c.passed ? null : c.reason;
+  if (prev.reject_reason !== reason || prev.flagged !== (c.passed ? 1 : 0)) return true;
+  if (now - prev.last_seen >= cfg.retention.candidateRefreshMinutes * 60_000) return true;
+  const moved = (a: number | null | undefined, b: number | null | undefined) =>
+    (a ?? 0) === 0 ? (b ?? 0) !== 0 : Math.abs((b ?? 0) / (a as number) - 1) >= cfg.retention.candidateChangePct;
+  return moved(prev.price, c.snap?.priceUsd) || moved(prev.liquidity, c.snap?.liquidityUsd);
+}
+
 function buildWrites(
   db: D1Database,
   lane: Lane,
   plan: TickPlan,
   now: number,
   solPrice: number,
-  prevReasons: Map<string, string | null>,
+  prevCandidates: Map<string, PrevCandidate>,
   cfg: Config,
   errors: string[],
 ): D1PreparedStatement[] {
@@ -348,6 +401,7 @@ function buildWrites(
 
   for (const c of plan.candidates) {
     const s = c.snap;
+    if (!candidateChanged(prevCandidates.get(c.mint), c, lane, now, cfg)) continue; // nothing new: skip the write
     w.push(
       db
         .prepare(
@@ -366,7 +420,7 @@ function buildWrites(
 
   for (const d of plan.decisions) {
     // Rejects are only re-logged when the reason changes, unless configured otherwise.
-    if (d.action === "reject" && !cfg.retention.logUnchangedRejects && prevReasons.get(d.mint) === d.reason) continue;
+    if (d.action === "reject" && !cfg.retention.logUnchangedRejects && prevCandidates.get(d.mint)?.reject_reason === d.reason) continue;
     w.push(db.prepare(`INSERT INTO decisions (lane, mint, action, reason, score, timestamp) VALUES (?,?,?,?,?,?)`).bind(lane, d.mint, d.action, d.reason, d.score, now));
   }
 
