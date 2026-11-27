@@ -118,6 +118,7 @@ export function geckoToSnapshot(p: GeckoPool, t: GeckoToken, now: number): Marke
     fdvUsd: numOrNull(t.attributes.fdv_usd ?? a.fdv_usd ?? a.market_cap_usd),
     volumeH1Usd: num(a.volume_usd?.h1),
     volumeM5Usd: num(a.volume_usd?.m5),
+    volumeH24Usd: num(a.volume_usd?.h24),
     txnsH1: tx("h1"),
     txnsM5: tx("m5"),
     priceChangeM5Pct: isBase ? numOrNull(a.price_change_percentage?.m5) : null,
@@ -125,4 +126,37 @@ export function geckoToSnapshot(p: GeckoPool, t: GeckoToken, now: number): Marke
     pairCreatedAt: createdMs,
     ageMinutes: createdMs ? Math.max(0, (now - createdMs) / 60_000) : null,
   };
+}
+
+/**
+ * Established pools for the stable lane: GeckoTerminal "trending" + "top by
+ * 24h volume" on Solana. Both lists include the base token, so they give
+ * discovery AND a full snapshot in one call each (no extra price lookups).
+ */
+export async function discoverGeckoEstablished(now: number): Promise<{ mints: DiscoveredMint[]; snapshots: MarketSnapshot[]; errors: string[] }> {
+  const feeds: [string, string][] = [
+    ["geckoterminal:trending", `${BASE}/trending_pools?include=base_token&page=1`],
+    ["geckoterminal:top_volume", `${BASE}/pools?include=base_token&page=1&sort=h24_volume_usd_desc`],
+  ];
+  const results = await Promise.allSettled(feeds.map(([, url]) => getJson<Doc<GeckoPool[]>>(url)));
+  const mints: DiscoveredMint[] = [];
+  const snaps = new Map<string, MarketSnapshot>();
+  const errors: string[] = [];
+  results.forEach((r, i) => {
+    if (r.status === "rejected") {
+      errors.push(`${feeds[i][0]}: ${String(r.reason)}`);
+      return;
+    }
+    const tokens = new Map<string, GeckoToken>();
+    for (const inc of r.value.included ?? []) if (inc.type === "token") tokens.set(inc.id, inc as GeckoToken);
+    for (const p of Array.isArray(r.value.data) ? r.value.data : []) {
+      const t = tokens.get(p.relationships?.base_token?.data?.id ?? "");
+      const snap = t ? geckoToSnapshot(p, t, now) : null;
+      if (!snap) continue;
+      mints.push({ mint: snap.mint, source: feeds[i][0], hintSymbol: snap.symbol });
+      const prev = snaps.get(snap.mint);
+      if (!prev || snap.liquidityUsd > prev.liquidityUsd) snaps.set(snap.mint, snap);
+    }
+  });
+  return { mints, snapshots: [...snaps.values()], errors };
 }

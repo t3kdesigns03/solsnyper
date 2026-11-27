@@ -2,12 +2,18 @@ import type { Config } from "../config";
 import type { OpenPosition } from "../types";
 
 // Exit rules. Same pattern as filters: pure functions, first match wins,
-// order = priority. Triggers use the raw price move (fees are applied to the
-// fill, not the trigger), so "-8%" means price is 8% below entry.
+// order = priority.
 //
-// Note on realism: we only see prices every ~45s, so a stop can "gap" — the
-// simulated fill is the price we observed, which may be worse than -8%. That
-// is closer to reality than pretending we filled at exactly -8%.
+// Trigger basis (CONFIG.exits.exitTriggerBasis):
+//   "net"   (default): take-profit, stop and give-back compare NET P&L after
+//           all costs (entry costs already paid + estimated exit DEX fee, gas
+//           and slippage), as a share of the cash put in. "+25%" = +25% net.
+//   "price": compare the raw price move vs. your fill price.
+// The hard stop ALWAYS fires on whichever of the two hits first, so a stop can
+// never be skipped because of how costs are estimated.
+//
+// Note on realism: we only see prices every ~45s, so a stop can "gap": the
+// simulated fill is the price we observe later, which may be worse than -8%.
 
 export interface ExitContext {
   now: number;
@@ -15,6 +21,11 @@ export interface ExitContext {
   /** latest observed price/liquidity; price null if the feed lost this token */
   price: number | null;
   liquidity: number | null;
+  /**
+   * Net P&L fraction if the position were sold at `price` now (after every
+   * cost). Supplied by planTick; without it, triggers fall back to price.
+   */
+  netAt?: (price: number) => number;
 }
 
 export interface ExitRule {
@@ -26,6 +37,16 @@ export interface ExitRule {
 const EPS = 1e-9;
 const pct = (x: number) => `${x >= 0 ? "+" : ""}${(x * 100).toFixed(1)}%`;
 
+/** The move a trigger compares, in the configured basis, plus a label for the reason text. */
+function gain(p: OpenPosition, price: number, ctx: ExitContext): { value: number; label: string; priceMove: number } {
+  const priceMove = price / p.entry_price - 1;
+  if (ctx.cfg.exits.exitTriggerBasis === "net" && ctx.netAt) {
+    const net = ctx.netAt(price);
+    return { value: net, label: `${pct(net)} net (${pct(priceMove)} price)`, priceMove };
+  }
+  return { value: priceMove, label: pct(priceMove), priceMove };
+}
+
 export const EXIT_RULES: ExitRule[] = [
   {
     name: "stale_price",
@@ -36,10 +57,12 @@ export const EXIT_RULES: ExitRule[] = [
   },
   {
     name: "hard_stop",
-    check: (p, { cfg, price }) => {
-      if (price === null) return null;
-      const chg = price / p.entry_price - 1;
-      return chg <= cfg.exits.hardStopPct + EPS ? `hard stop ${pct(chg)}` : null;
+    check: (p, ctx) => {
+      if (ctx.price === null) return null;
+      const g = gain(p, ctx.price, ctx);
+      const stop = ctx.cfg.exits.hardStopPct + EPS;
+      // Fires on the configured basis OR the raw price move, whichever is hit first.
+      return g.value <= stop || g.priceMove <= stop ? `hard stop ${g.label}` : null;
     },
   },
   {
@@ -51,23 +74,22 @@ export const EXIT_RULES: ExitRule[] = [
   },
   {
     name: "take_profit",
-    check: (p, { cfg, price }) => {
-      if (price === null) return null;
-      const chg = price / p.entry_price - 1;
-      return chg >= cfg.exits.takeProfitPct - EPS ? `take profit ${pct(chg)}` : null;
+    check: (p, ctx) => {
+      if (ctx.price === null) return null;
+      const g = gain(p, ctx.price, ctx);
+      return g.value >= ctx.cfg.exits.takeProfitPct - EPS ? `take profit ${g.label}` : null;
     },
   },
   {
     name: "giveback",
-    check: (p, { cfg, price }) => {
-      if (price === null) return null;
-      const peak = Math.max(p.peak_price, price);
-      const peakGain = peak / p.entry_price - 1;
-      if (peakGain < cfg.exits.givebackArmAtGainPct) return null;
-      const gain = price / p.entry_price - 1;
-      const givenBack = (peakGain - gain) / peakGain;
-      return givenBack >= cfg.exits.givebackFraction
-        ? `gave back ${(givenBack * 100).toFixed(0)}% of ${pct(peakGain)} peak (now ${pct(gain)})`
+    check: (p, ctx) => {
+      if (ctx.price === null) return null;
+      const peak = gain(p, Math.max(p.peak_price, ctx.price), ctx).value;
+      if (peak < ctx.cfg.exits.givebackArmAtGainPct) return null;
+      const now = gain(p, ctx.price, ctx);
+      const givenBack = (peak - now.value) / peak;
+      return givenBack >= ctx.cfg.exits.givebackFraction
+        ? `gave back ${(givenBack * 100).toFixed(0)}% of ${pct(peak)} peak (now ${now.label})`
         : null;
     },
   },

@@ -1,5 +1,5 @@
 import { discoverDexScreener, fetchSnapshots } from "../sources/dexscreener";
-import { discoverGeckoTerminal, fetchGeckoSnapshots } from "../sources/geckoterminal";
+import { discoverGeckoEstablished, discoverGeckoTerminal, fetchGeckoSnapshots } from "../sources/geckoterminal";
 import type { DiscoveredMint, MarketSnapshot } from "../types";
 
 // Market relay: runs on Netlify (AWS), because GeckoTerminal and DexScreener
@@ -13,10 +13,12 @@ export const MAX_MINTS = 150;
 export interface RelayRequest {
   mints: string[]; // held + pump.fun mints the Worker already knows about
   dexscreener?: boolean; // default true
+  established?: boolean; // default true: also fetch trending / top-volume pools (stable lane)
 }
 
 export interface RelayResponse {
-  discovered: DiscoveredMint[];
+  discovered: DiscoveredMint[]; // brand-new pools (sniper lane)
+  established: DiscoveredMint[]; // trending / top-volume pools (stable lane)
   snapshots: MarketSnapshot[];
   solPriceUsd: number | null;
   errors: string[];
@@ -30,7 +32,7 @@ export function parseRelayRequest(body: unknown): RelayRequest | null {
   const b = body as Record<string, unknown>;
   if (!Array.isArray(b.mints)) return null;
   const mints = [...new Set(b.mints.filter((m): m is string => typeof m === "string" && MINT_RE.test(m)))].slice(0, MAX_MINTS);
-  return { mints, dexscreener: b.dexscreener !== false };
+  return { mints, dexscreener: b.dexscreener !== false, established: b.established !== false };
 }
 
 /** Rounds to 6 significant digits; keeps the payload small without losing meaningful precision. */
@@ -49,6 +51,7 @@ export function trimSnapshot(s: MarketSnapshot): MarketSnapshot {
     fdvUsd: s.fdvUsd === null ? null : Math.round(s.fdvUsd),
     volumeH1Usd: Math.round(s.volumeH1Usd),
     volumeM5Usd: Math.round(s.volumeM5Usd),
+    volumeH24Usd: s.volumeH24Usd === undefined ? undefined : Math.round(s.volumeH24Usd),
     txnsH1: s.txnsH1,
     txnsM5: s.txnsM5,
     priceChangeM5Pct: sigOrNull(s.priceChangeM5Pct),
@@ -64,7 +67,11 @@ export async function buildMarketResponse(req: RelayRequest, now = Date.now()): 
   // Phase 1: discovery (parallel).
   const jobs: [string, () => Promise<DiscoveredMint[]>][] = [["geckoterminal", discoverGeckoTerminal]];
   if (req.dexscreener !== false) jobs.push(["dexscreener", discoverDexScreener]);
-  const found = await Promise.allSettled(jobs.map(([, fn]) => fn()));
+  const [found, est] = await Promise.all([
+    Promise.allSettled(jobs.map(([, fn]) => fn())),
+    req.established !== false ? discoverGeckoEstablished(now) : Promise.resolve({ mints: [], snapshots: [], errors: [] }),
+  ]);
+  errors.push(...est.errors);
   const discovered: DiscoveredMint[] = [];
   found.forEach((r, i) => {
     if (r.status === "fulfilled") discovered.push(...r.value);
@@ -73,9 +80,11 @@ export async function buildMarketResponse(req: RelayRequest, now = Date.now()): 
 
   // Phase 2: prices for everything the Worker asked about + what we just found + SOL.
   const wanted = [...new Set([...req.mints, ...discovered.map((d) => d.mint), WSOL])].slice(0, MAX_MINTS + 1);
-  const snaps = new Map<string, MarketSnapshot>();
+  // Established pools already came with full snapshots; only price the rest.
+  const snaps = new Map<string, MarketSnapshot>(est.snapshots.map((s) => [s.mint, s]));
+  const toPrice = wanted.filter((m) => !snaps.has(m));
   try {
-    for (const [k, v] of await fetchGeckoSnapshots(wanted, now)) snaps.set(k, v);
+    for (const [k, v] of await fetchGeckoSnapshots(toPrice, now)) snaps.set(k, v);
   } catch (e) {
     errors.push(`geckoterminal snapshots: ${String(e)}`);
   }
@@ -92,6 +101,7 @@ export async function buildMarketResponse(req: RelayRequest, now = Date.now()): 
   snaps.delete(WSOL);
   return {
     discovered,
+    established: est.mints,
     snapshots: [...snaps.values()].map(trimSnapshot),
     solPriceUsd: sol?.priceUsd || null,
     errors,

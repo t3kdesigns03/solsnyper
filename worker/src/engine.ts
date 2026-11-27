@@ -1,6 +1,6 @@
-import { CONFIG, type Config } from "./config";
+import { CONFIG, type Config, LANE_CONFIG, LANES, type Lane } from "./config";
 import { discoverDexScreener, fetchSnapshots, fetchSolPrice } from "./sources/dexscreener";
-import { discoverGeckoTerminal, fetchGeckoSnapshots } from "./sources/geckoterminal";
+import { discoverGeckoEstablished, discoverGeckoTerminal, fetchGeckoSnapshots } from "./sources/geckoterminal";
 import { discoverPumpFun } from "./sources/pumpfun";
 import { callRelay } from "./sources/relay";
 import { planTick, type TickPlan } from "./strategy/decide";
@@ -13,12 +13,15 @@ export interface Sources {
   discover(env: Env): Promise<{ mints: DiscoveredMint[]; errors: string[] }>;
   snapshots(mints: string[], now: number, env?: Env): Promise<Map<string, MarketSnapshot>>;
   solPrice(now: number, env?: Env): Promise<number | null>;
+  /** Optional: established pools (stable lane) with their snapshots. */
+  established?(env: Env, now: number): Promise<{ mints: DiscoveredMint[]; snapshots: MarketSnapshot[]; errors: string[] }>;
   /** Optional one-shot fetch of discovery + prices (used for the Netlify relay). */
   market?(env: Env, held: string[], now: number): Promise<MarketData>;
 }
 
 export interface MarketData {
-  mints: DiscoveredMint[];
+  mints: DiscoveredMint[]; // brand-new pools (sniper lane)
+  established: DiscoveredMint[]; // established pools (stable lane)
   errors: string[];
   snapshots: Map<string, MarketSnapshot>;
   solPrice: number | null;
@@ -34,7 +37,14 @@ async function fetchMarket(sources: Sources, env: Env, held: string[], now: numb
   } catch (e) {
     errors.push(`snapshots: ${String(e)}`);
   }
-  return { mints: disc.mints, errors, snapshots, solPrice: await sources.solPrice(now, env) };
+  let established: DiscoveredMint[] = [];
+  if (sources.established) {
+    const est = await sources.established(env, now);
+    errors.push(...est.errors);
+    established = est.mints;
+    for (const sn of est.snapshots) if (!snapshots.has(sn.mint)) snapshots.set(sn.mint, sn);
+  }
+  return { mints: disc.mints, established, errors, snapshots, solPrice: await sources.solPrice(now, env) };
 }
 
 const on = (v: string | undefined) => v !== "false";
@@ -57,6 +67,7 @@ async function discoverDirect(env: Env, includePumpFun: boolean) {
 
 export const liveSources: Sources = {
   discover: (env) => discoverDirect(env, true),
+  established: async (env, now) => (on(env.ENABLE_GECKOTERMINAL) ? discoverGeckoEstablished(now) : { mints: [], snapshots: [], errors: [] }),
 
   // Relay path: pump.fun direct (it works from Cloudflare), then ONE call to the
   // Netlify relay for GeckoTerminal/DexScreener discovery + prices. If the relay
@@ -78,6 +89,7 @@ export const liveSources: Sources = {
       });
       return {
         mints: [...pump, ...r.discovered],
+        established: r.established,
         errors: [...errors, ...r.errors.map((e) => `relay/${e}`)],
         snapshots: new Map(r.snapshots.map((s) => [s.mint, s])),
         solPrice: r.solPriceUsd,
@@ -126,83 +138,129 @@ export const liveSources: Sources = {
   },
 };
 
-export interface TickSummary {
-  startedAt: number;
-  durationMs: number;
+export interface LaneSummary {
   candidatesSeen: number;
   buys: number;
   sells: number;
   equityUsd: number;
-  errors: string[];
 }
 
-export async function runTick(env: Env, now = Date.now(), sources: Sources = liveSources, cfg: Config = CONFIG): Promise<TickSummary> {
-  const db = env.DB;
-  const errors: string[] = [];
+/** Top-level fields are the sniper lane's (kept for older callers); `lanes` has both. */
+export interface TickSummary extends LaneSummary {
+  startedAt: number;
+  durationMs: number;
+  errors: string[];
+  lanes: Record<Lane, LaneSummary>;
+}
 
-  // --- load state
-  const wallet = await db.prepare("SELECT cash_usd, sol_price_usd FROM wallet WHERE id = 1").first<{ cash_usd: number; sol_price_usd: number }>();
-  if (!wallet) throw new Error("wallet row missing: run the D1 migrations");
-  const open = (await db.prepare("SELECT * FROM positions WHERE status = 'open'").all<OpenPosition>()).results;
-  const pending = (await db.prepare("SELECT * FROM pending_orders ORDER BY id").all<PendingOrder>()).results;
-  const cooldownStart = now - cfg.filters.reentryCooldownMinutes * 60_000;
+// ── Per-lane storage ─────────────────────────────────────────────────────────
+// The sniper lane keeps the original single-row `wallet` table and
+// `equity_snapshots`; other lanes use `lane_wallets` / `lane_equity`
+// (migration 0004). Everything else is one table with a `lane` column.
+
+async function readWallet(db: D1Database, lane: Lane): Promise<{ cash_usd: number; sol_price_usd: number }> {
+  const sniper = await db.prepare("SELECT cash_usd, sol_price_usd FROM wallet WHERE id = 1").first<{ cash_usd: number; sol_price_usd: number }>();
+  if (!sniper) throw new Error("wallet row missing: run the D1 migrations");
+  if (lane === "sniper") return sniper;
+  const w = await db.prepare("SELECT cash_usd FROM lane_wallets WHERE lane = ?").bind(lane).first<{ cash_usd: number }>();
+  if (!w) throw new Error(`lane_wallets row for '${lane}' missing: run the D1 migrations`);
+  return { cash_usd: w.cash_usd, sol_price_usd: sniper.sol_price_usd };
+}
+
+interface LaneState {
+  lane: Lane;
+  cfg: Config;
+  cashUsd: number;
+  open: OpenPosition[];
+  pending: PendingOrder[];
+  recentlyTraded: Map<string, number>;
+  recentSymbols: Map<string, number>;
+  buysLastHour: number;
+}
+
+async function loadLane(db: D1Database, lane: Lane, cfg: Config, now: number): Promise<LaneState & { solPrice: number }> {
+  const wallet = await readWallet(db, lane);
+  const open = (await db.prepare("SELECT * FROM positions WHERE status = 'open' AND lane = ?").bind(lane).all<OpenPosition>()).results;
+  const pending = (await db.prepare("SELECT * FROM pending_orders WHERE lane = ? ORDER BY id").bind(lane).all<PendingOrder>()).results;
   const recent = (
     await db
-      .prepare("SELECT mint, MAX(timestamp) AS t FROM trades WHERE timestamp > ? GROUP BY mint")
-      .bind(cooldownStart)
+      .prepare("SELECT mint, MAX(timestamp) AS t FROM trades WHERE lane = ? AND timestamp > ? GROUP BY mint")
+      .bind(lane, now - cfg.filters.reentryCooldownMinutes * 60_000)
       .all<{ mint: string; t: number }>()
   ).results;
-  const recentlyTraded = new Map(recent.map((r) => [r.mint, r.t]));
   // Cost control: symbols bought recently (relaunch check) and the rolling-hour buy count.
   const symWindow = Math.max(1, cfg.costControl.symbolCooldownMinutes) * 60_000;
-  const recentSymbols = new Map(
-    (
-      await db
-        .prepare("SELECT UPPER(symbol) AS s, MAX(timestamp) AS t FROM trades WHERE side='buy' AND timestamp > ? GROUP BY UPPER(symbol)")
-        .bind(now - symWindow)
-        .all<{ s: string; t: number }>()
-    ).results.map((r) => [r.s, r.t]),
-  );
+  const symbols = (
+    await db
+      .prepare("SELECT UPPER(symbol) AS s, MAX(timestamp) AS t FROM trades WHERE lane = ? AND side='buy' AND timestamp > ? GROUP BY UPPER(symbol)")
+      .bind(lane, now - symWindow)
+      .all<{ s: string; t: number }>()
+  ).results;
   const buysLastHour =
-    (await db.prepare("SELECT COUNT(*) AS n FROM trades WHERE side='buy' AND timestamp > ?").bind(now - 3_600_000).first<{ n: number }>())?.n ?? 0;
+    (await db.prepare("SELECT COUNT(*) AS n FROM trades WHERE lane = ? AND side='buy' AND timestamp > ?").bind(lane, now - 3_600_000).first<{ n: number }>())?.n ?? 0;
+  return {
+    lane, cfg, cashUsd: wallet.cash_usd, solPrice: wallet.sol_price_usd, open, pending,
+    recentlyTraded: new Map(recent.map((r) => [r.mint, r.t])),
+    recentSymbols: new Map(symbols.map((r) => [r.s, r.t])),
+    buysLastHour,
+  };
+}
+
+export async function runTick(
+  env: Env,
+  now = Date.now(),
+  sources: Sources = liveSources,
+  lanes: Partial<Record<Lane, Config>> = LANE_CONFIG,
+): Promise<TickSummary> {
+  const db = env.DB;
+  const errors: string[] = [];
+  const active = LANES.filter((l) => lanes[l]);
+
+  // --- load state for every lane
+  const states = await Promise.all(active.map((l) => loadLane(db, l, lanes[l]!, now)));
+  const retention = (lanes.sniper ?? CONFIG).retention;
   const prevReasons = new Map(
     (
       await db
         .prepare("SELECT mint, reject_reason FROM candidates WHERE last_seen > ?")
-        .bind(now - cfg.retention.candidatesHours * 3_600_000)
+        .bind(now - retention.candidatesHours * 3_600_000)
         .all<{ mint: string; reject_reason: string | null }>()
     ).results.map((r) => [r.mint, r.reject_reason]),
   );
 
-  // --- fetch market data (mints with a pending buy count as held, so they get priced)
-  const held = [...open.map((p) => p.mint), ...pending.filter((o) => o.side === "buy").map((o) => o.mint)];
+  // --- ONE market fetch for all lanes (mints with a pending buy count as held, so they get priced)
+  const held = [...new Set(states.flatMap((s) => [...s.open.map((p) => p.mint), ...s.pending.filter((o) => o.side === "buy").map((o) => o.mint)]))];
   const market = sources.market ? await sources.market(env, held, now) : await fetchMarket(sources, env, held, now);
   errors.push(...market.errors);
   // SOL price: live, else last stored; planTick falls back to CONFIG if both are 0.
-  const solPrice = market.solPrice ?? wallet.sol_price_usd;
+  const solPrice = market.solPrice ?? states[0]?.solPrice ?? 0;
 
-  // --- decide (pure)
-  const plan = planTick({
-    now, cfg, cashUsd: wallet.cash_usd, solPriceUsd: solPrice, open, pending,
-    discovered: market.mints, snapshots: market.snapshots, recentlyTraded, recentSymbols, buysLastHour,
-  });
+  // --- decide (pure) per lane, then persist everything in one batch
+  const writes: D1PreparedStatement[] = [];
+  const summaries = {} as Record<Lane, LaneSummary>;
+  for (const st of states) {
+    const plan = planTick({
+      now, cfg: st.cfg, cashUsd: st.cashUsd, solPriceUsd: solPrice, open: st.open, pending: st.pending,
+      discovered: st.lane === "stable" ? market.established : market.mints,
+      snapshots: market.snapshots, recentlyTraded: st.recentlyTraded, recentSymbols: st.recentSymbols, buysLastHour: st.buysLastHour,
+    });
+    writes.push(...buildWrites(db, st.lane, plan, now, solPrice, prevReasons, st.cfg, errors));
+    summaries[st.lane] = { candidatesSeen: plan.candidates.length, buys: plan.buys.length, sells: plan.sells.length, equityUsd: plan.equityAfter };
+  }
+  writes.push(
+    db.prepare(`DELETE FROM decisions WHERE timestamp < ?`).bind(now - retention.decisionsDays * 86_400_000),
+    db.prepare(`DELETE FROM candidates WHERE last_seen < ?`).bind(now - retention.candidatesHours * 3_600_000),
+    db.prepare(`DELETE FROM runs WHERE started_at < ?`).bind(now - retention.decisionsDays * 86_400_000),
+  );
+  await db.batch(writes);
 
-  // --- persist
-  await db.batch(buildWrites(db, plan, now, solPrice, prevReasons, cfg, errors));
-
-  return {
-    startedAt: now,
-    durationMs: Date.now() - now,
-    candidatesSeen: plan.candidates.length,
-    buys: plan.buys.length,
-    sells: plan.sells.length,
-    equityUsd: plan.equityAfter,
-    errors,
-  };
+  const sniper = summaries.sniper ?? { candidatesSeen: 0, buys: 0, sells: 0, equityUsd: 0 };
+  return { startedAt: now, durationMs: Date.now() - now, ...sniper, errors, lanes: summaries };
 }
 
 function buildWrites(
   db: D1Database,
+  lane: Lane,
   plan: TickPlan,
   now: number,
   solPrice: number,
@@ -226,11 +284,11 @@ function buildWrites(
         .bind(f.signalPrice, f.fillPrice, s.signalPrice, now, f.pnlUsd, f.costs.dexFeeUsd, f.costs.networkFeeUsd, f.costs.slippageUsd, reason, now, s.pos.id),
       db
         .prepare(
-          `INSERT INTO trades (position_id, mint, symbol, side, price, signal_price, size_usd, fees_usd, dex_fee_usd, network_fee_usd, slippage_usd, pnl_usd, reason, timestamp)
-           VALUES (?,?,?,'sell',?,?,?,?,?,?,?,?,?,?)`,
+          `INSERT INTO trades (lane, position_id, mint, symbol, side, price, signal_price, size_usd, fees_usd, dex_fee_usd, network_fee_usd, slippage_usd, pnl_usd, reason, timestamp)
+           VALUES (?,?,?,?,'sell',?,?,?,?,?,?,?,?,?,?)`,
         )
         .bind(
-          s.pos.id, s.pos.mint, s.pos.symbol, f.fillPrice, s.signalPrice, f.receivedUsd, f.costs.dexFeeUsd + f.costs.networkFeeUsd,
+          lane, s.pos.id, s.pos.mint, s.pos.symbol, f.fillPrice, s.signalPrice, f.receivedUsd, f.costs.dexFeeUsd + f.costs.networkFeeUsd,
           f.costs.dexFeeUsd, f.costs.networkFeeUsd, f.costs.slippageUsd, f.pnlUsd, reason, now,
         ),
     );
@@ -253,23 +311,23 @@ function buildWrites(
     w.push(
       db
         .prepare(
-          `INSERT INTO positions (mint, symbol, pair_address, dex_id, entry_price, entry_signal_price, entry_time, size_usd, quantity, entry_fee_usd,
+          `INSERT INTO positions (lane, mint, symbol, pair_address, dex_id, entry_price, entry_signal_price, entry_time, size_usd, quantity, entry_fee_usd,
              entry_dex_fee_usd, entry_network_fee_usd, entry_slippage_usd, entry_liquidity, current_price, current_liquidity, peak_price, unrealized_pnl, last_update, status,
              entry_score, entry_signal_liquidity, entry_age_minutes, entry_fdv_usd, entry_volume_h1_usd, entry_buys_h1, entry_sells_h1, entry_change_m5_pct, entry_change_h1_pct)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?)`,
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'open',?,?,?,?,?,?,?,?,?)`,
         )
         .bind(
-          s.mint, s.symbol, s.pairAddress, s.dexId, f.fillPrice, b.signalPrice, now, size, f.quantity, f.cashOut - size,
+          lane, s.mint, s.symbol, s.pairAddress, s.dexId, f.fillPrice, b.signalPrice, now, size, f.quantity, f.cashOut - size,
           f.costs.dexFeeUsd, f.costs.networkFeeUsd, f.costs.slippageUsd, s.liquidityUsd, s.priceUsd, s.liquidityUsd, f.fillPrice, -f.costs.totalUsd, now,
           b.score, b.signalLiquidity, s.ageMinutes, s.fdvUsd, s.volumeH1Usd, s.txnsH1.buys, s.txnsH1.sells, s.priceChangeM5Pct, s.priceChangeH1Pct,
         ),
       db
         .prepare(
-          `INSERT INTO trades (position_id, mint, symbol, side, price, signal_price, size_usd, fees_usd, dex_fee_usd, network_fee_usd, slippage_usd, pnl_usd, reason, timestamp)
-           VALUES ((SELECT MAX(id) FROM positions WHERE mint=? AND status='open'),?,?,'buy',?,?,?,?,?,?,?,0,?,?)`,
+          `INSERT INTO trades (lane, position_id, mint, symbol, side, price, signal_price, size_usd, fees_usd, dex_fee_usd, network_fee_usd, slippage_usd, pnl_usd, reason, timestamp)
+           VALUES (?,(SELECT MAX(id) FROM positions WHERE mint=? AND status='open' AND lane=?),?,?,'buy',?,?,?,?,?,?,?,0,?,?)`,
         )
         .bind(
-          s.mint, s.mint, s.symbol, f.fillPrice, b.signalPrice, size, f.costs.dexFeeUsd + f.costs.networkFeeUsd,
+          lane, s.mint, lane, s.mint, s.symbol, f.fillPrice, b.signalPrice, size, f.costs.dexFeeUsd + f.costs.networkFeeUsd,
           f.costs.dexFeeUsd, f.costs.networkFeeUsd, f.costs.slippageUsd, b.reason, now,
         ),
     );
@@ -281,8 +339,10 @@ function buildWrites(
   for (const o of plan.newOrders) {
     w.push(
       db
-        .prepare(`INSERT INTO pending_orders (side, mint, symbol, position_id, signal_price, signal_time, reason, score, ticks_waited, signal_liquidity) VALUES (?,?,?,?,?,?,?,?,0,?)`)
-        .bind(o.side, o.mint, o.symbol, o.position_id, o.signal_price, o.signal_time, o.reason, o.score, o.signal_liquidity),
+        .prepare(
+          `INSERT INTO pending_orders (lane, side, mint, symbol, position_id, signal_price, signal_time, reason, score, ticks_waited, signal_liquidity) VALUES (?,?,?,?,?,?,?,?,?,0,?)`,
+        )
+        .bind(lane, o.side, o.mint, o.symbol, o.position_id, o.signal_price, o.signal_time, o.reason, o.score, o.signal_liquidity),
     );
   }
 
@@ -291,14 +351,14 @@ function buildWrites(
     w.push(
       db
         .prepare(
-          `INSERT INTO candidates (mint, symbol, source, pair_address, dex_id, liquidity, volume, age_minutes, price, flagged, reject_reason, score, first_seen, last_seen)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-           ON CONFLICT(mint) DO UPDATE SET symbol=excluded.symbol, pair_address=excluded.pair_address, dex_id=excluded.dex_id,
+          `INSERT INTO candidates (lane, mint, symbol, source, pair_address, dex_id, liquidity, volume, age_minutes, price, flagged, reject_reason, score, first_seen, last_seen)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+           ON CONFLICT(mint) DO UPDATE SET lane=excluded.lane, symbol=excluded.symbol, source=excluded.source, pair_address=excluded.pair_address, dex_id=excluded.dex_id,
              liquidity=excluded.liquidity, volume=excluded.volume, age_minutes=excluded.age_minutes, price=excluded.price,
              flagged=excluded.flagged, reject_reason=excluded.reject_reason, score=excluded.score, last_seen=excluded.last_seen`,
         )
         .bind(
-          c.mint, c.symbol, c.source, s?.pairAddress ?? null, s?.dexId ?? null, s?.liquidityUsd ?? null, s?.volumeH1Usd ?? null,
+          lane, c.mint, c.symbol, c.source, s?.pairAddress ?? null, s?.dexId ?? null, s?.liquidityUsd ?? null, s?.volumeH1Usd ?? null,
           s?.ageMinutes ?? null, s?.priceUsd ?? null, c.passed ? 1 : 0, c.passed ? null : c.reason, c.score, now, now,
         ),
     );
@@ -307,21 +367,28 @@ function buildWrites(
   for (const d of plan.decisions) {
     // Rejects are only re-logged when the reason changes, unless configured otherwise.
     if (d.action === "reject" && !cfg.retention.logUnchangedRejects && prevReasons.get(d.mint) === d.reason) continue;
-    w.push(db.prepare(`INSERT INTO decisions (mint, action, reason, score, timestamp) VALUES (?,?,?,?,?)`).bind(d.mint, d.action, d.reason, d.score, now));
+    w.push(db.prepare(`INSERT INTO decisions (lane, mint, action, reason, score, timestamp) VALUES (?,?,?,?,?,?)`).bind(lane, d.mint, d.action, d.reason, d.score, now));
   }
 
+  if (lane === "sniper") {
+    w.push(
+      db
+        .prepare(`UPDATE wallet SET cash_usd=?, cash_sol=?, equity_usd=?, sol_price_usd=?, updated_at=? WHERE id=1`)
+        .bind(plan.cashAfter, solPrice > 0 ? plan.cashAfter / solPrice : 0, plan.equityAfter, solPrice, now),
+      db.prepare(`INSERT OR REPLACE INTO equity_snapshots (timestamp, equity_usd, cash_usd, open_positions) VALUES (?,?,?,?)`).bind(now, plan.equityAfter, plan.cashAfter, plan.openAfter),
+    );
+  } else {
+    w.push(
+      db.prepare(`UPDATE lane_wallets SET cash_usd=?, equity_usd=?, updated_at=? WHERE lane=?`).bind(plan.cashAfter, plan.equityAfter, now, lane),
+      db
+        .prepare(`INSERT OR REPLACE INTO lane_equity (lane, timestamp, equity_usd, cash_usd, open_positions) VALUES (?,?,?,?,?)`)
+        .bind(lane, now, plan.equityAfter, plan.cashAfter, plan.openAfter),
+    );
+  }
   w.push(
     db
-      .prepare(`UPDATE wallet SET cash_usd=?, cash_sol=?, equity_usd=?, sol_price_usd=?, updated_at=? WHERE id=1`)
-      .bind(plan.cashAfter, solPrice > 0 ? plan.cashAfter / solPrice : 0, plan.equityAfter, solPrice, now),
-    db.prepare(`INSERT OR REPLACE INTO equity_snapshots (timestamp, equity_usd, cash_usd, open_positions) VALUES (?,?,?,?)`).bind(now, plan.equityAfter, plan.cashAfter, plan.openAfter),
-    db
-      .prepare(`INSERT INTO runs (started_at, duration_ms, candidates_seen, buys, sells, errors) VALUES (?,?,?,?,?,?)`)
-      .bind(now, Date.now() - now, plan.candidates.length, plan.buys.length, plan.sells.length, errors.length ? errors.join(" | ") : null),
-    // retention
-    db.prepare(`DELETE FROM decisions WHERE timestamp < ?`).bind(now - cfg.retention.decisionsDays * 86_400_000),
-    db.prepare(`DELETE FROM candidates WHERE last_seen < ?`).bind(now - cfg.retention.candidatesHours * 3_600_000),
-    db.prepare(`DELETE FROM runs WHERE started_at < ?`).bind(now - cfg.retention.decisionsDays * 86_400_000),
+      .prepare(`INSERT INTO runs (lane, started_at, duration_ms, candidates_seen, buys, sells, errors) VALUES (?,?,?,?,?,?,?)`)
+      .bind(lane, now, Date.now() - now, plan.candidates.length, plan.buys.length, plan.sells.length, errors.length ? errors.join(" | ") : null),
   );
   return w;
 }

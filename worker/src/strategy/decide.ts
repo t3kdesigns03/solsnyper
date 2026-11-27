@@ -162,7 +162,10 @@ export function planTick(input: TickInput): TickPlan {
       }
       waitingOrders.push({ id: order.id, ticksWaited: order.ticks_waited + 1 });
     } else {
-      const exit = evaluateExit(pos, { now, cfg, price, liquidity: snap ? snap.liquidityUsd : null });
+      // Net P&L (after every cost) if sold at a given price now, as a share of the cash put in.
+      const basis = pos.size_usd + pos.entry_fee_usd;
+      const netAt = (px: number) => markToMarket(pos, { ...m, price: px }, costs).unrealizedPnl / basis;
+      const exit = evaluateExit(pos, { now, cfg, price, liquidity: snap ? snap.liquidityUsd : null, netAt });
       if (exit && delay === 0) {
         sell(pos, m, exit.rule, exit.reason, lastPrice);
         continue;
@@ -215,8 +218,8 @@ export function planTick(input: TickInput): TickPlan {
       const rt = poolRoundTripCostPct(snap, cfg, sol);
       const drop = o.signal_liquidity && o.signal_liquidity > 0 ? 1 - snap.liquidityUsd / o.signal_liquidity : 0;
       if (drop > cfg.costControl.maxLiquidityDropAtFillPct)
-        cancel = `liquidity fell ${(drop * 100).toFixed(0)}% since the signal (${Math.round(o.signal_liquidity!).toLocaleString("en-US")} -> ${Math.round(snap.liquidityUsd).toLocaleString("en-US")})`;
-      else if (rt > maxRt) cancel = `pool too thin at fill: round trip ${(rt * 100).toFixed(1)}% > ${(maxRt * 100).toFixed(1)}% (liquidity ${Math.round(snap.liquidityUsd).toLocaleString("en-US")})`;
+        cancel = `liquidity fell ${(drop * 100).toFixed(0)}% since the signal ($${Math.round(o.signal_liquidity!).toLocaleString("en-US")} -> $${Math.round(snap.liquidityUsd).toLocaleString("en-US")})`;
+      else if (rt > maxRt) cancel = `pool too thin at fill: round trip ${(rt * 100).toFixed(1)}% > ${(maxRt * 100).toFixed(1)}% (liquidity $${Math.round(snap.liquidityUsd).toLocaleString("en-US")})`;
     }
     const size = snap && !cancel ? tradeSizeUsd(snap, cfg, sol) : cfg.wallet.buySizeUsd;
     const fill = snap && !cancel ? simulateBuy(size, { price: snap.priceUsd, liquidityUsd: snap.liquidityUsd, dexId: snap.dexId, solPriceUsd: sol }, costs) : null;
@@ -235,7 +238,7 @@ export function planTick(input: TickInput): TickPlan {
     decisions.push({
       mint: o.mint,
       action: "buy",
-      reason: `filled ${size} buy @ ${fill.fillPrice.toPrecision(4)} (${pctMove(fill.fillPrice, o.signal_price)} vs signal ${o.signal_price.toPrecision(4)}) · costs $${fill.costs.totalUsd.toFixed(2)}`,
+      reason: `filled $${size} buy @ ${fill.fillPrice.toPrecision(4)} (${pctMove(fill.fillPrice, o.signal_price)} vs signal ${o.signal_price.toPrecision(4)}) · costs $${fill.costs.totalUsd.toFixed(2)}`,
       score: o.score,
     });
   }
@@ -301,7 +304,7 @@ export function planTick(input: TickInput): TickPlan {
       recentlyTraded.set(c.snap.mint, now);
       buys.push({ snap: c.snap, sizeUsd: size, signalLiquidity: c.snap.liquidityUsd, score: c.score, fill, signalPrice: c.snap.priceUsd, reason: why });
       c.row.reason = "bought";
-      decisions.push({ mint: c.snap.mint, action: "buy", reason: `passed all filters, ${size} buy @ ${fill.fillPrice.toPrecision(4)} · costs $${fill.costs.totalUsd.toFixed(2)}`, score: c.score });
+      decisions.push({ mint: c.snap.mint, action: "buy", reason: `passed all filters, $${size} buy @ ${fill.fillPrice.toPrecision(4)} · costs $${fill.costs.totalUsd.toFixed(2)}`, score: c.score });
     } else {
       reserved += fill.cashOut;
       newOrders.push({
@@ -309,7 +312,7 @@ export function planTick(input: TickInput): TickPlan {
         signal_time: now, reason: why, score: c.score, ticks_waited: 0, signal_liquidity: c.snap.liquidityUsd,
       });
       c.row.reason = delay === 1 ? "buy order placed (fills next tick)" : `buy order placed (fills in ${delay} ticks)`;
-      decisions.push({ mint: c.snap.mint, action: "order", reason: `passed all filters, ~${size} buy order @ signal ${c.snap.priceUsd.toPrecision(4)}`, score: c.score });
+      decisions.push({ mint: c.snap.mint, action: "order", reason: `passed all filters, ~$${size} buy order @ signal ${c.snap.priceUsd.toPrecision(4)}`, score: c.score });
     }
   }
 

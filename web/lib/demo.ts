@@ -121,6 +121,7 @@ export function demoData(path: string): unknown {
   const p = path.split("?")[0];
   switch (p) {
     case "/api/summary": return cache.summary;
+    case "/api/lanes": return (["sniper", "stable"] as const).map((lane) => ({ lane, wallet: cache!.summary.wallet, realizedPnl: cache!.summary.realizedPnl, closedTrades: cache!.summary.closedTrades, wins: cache!.summary.wins, costs: cache!.summary.costs, openPositions: cache!.summary.openPositions, unrealizedPnl: cache!.summary.unrealizedPnl, exposureUsd: cache!.summary.exposureUsd }));
     case "/api/candidates": return cache.candidates;
     case "/api/positions": return cache.positions;
     case "/api/closed": return cache.closed;

@@ -49,6 +49,13 @@ export interface EntryRule {
 
 const fmtUsd = (n: number) => `$${Math.round(n).toLocaleString("en-US")}`;
 
+// Base assets / stablecoins: pools where these are the "token" are not trades we want.
+const BASE_ASSETS = new Set([
+  "So11111111111111111111111111111111111111112", // wSOL
+  "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v", // USDC
+  "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB", // USDT
+]);
+
 export const ENTRY_RULES: EntryRule[] = [
   {
     name: "already_held",
@@ -68,12 +75,18 @@ export const ENTRY_RULES: EntryRule[] = [
     check: (s) => (s.priceUsd > 0 ? null : "no USD price"),
   },
   {
+    name: "base_asset",
+    check: (s) => (BASE_ASSETS.has(s.mint) ? "SOL / stablecoin pool" : null),
+  },
+  {
     name: "age",
     check: (s, { cfg }) => {
       if (s.ageMinutes === null) return "unknown pair age";
-      return s.ageMinutes > cfg.filters.maxAgeMinutes
-        ? `too old (${s.ageMinutes.toFixed(0)}m > ${cfg.filters.maxAgeMinutes}m)`
-        : null;
+      if (cfg.filters.maxAgeMinutes > 0 && s.ageMinutes > cfg.filters.maxAgeMinutes)
+        return `too old (${s.ageMinutes.toFixed(0)}m > ${cfg.filters.maxAgeMinutes}m)`;
+      if (cfg.filters.minAgeMinutes > 0 && s.ageMinutes < cfg.filters.minAgeMinutes)
+        return `too new (${s.ageMinutes.toFixed(0)}m < ${cfg.filters.minAgeMinutes}m)`;
+      return null;
     },
   },
   {
@@ -95,6 +108,13 @@ export const ENTRY_RULES: EntryRule[] = [
     check: (s, { cfg }) =>
       s.volumeH1Usd < cfg.filters.minVolumeH1Usd
         ? `1h volume ${fmtUsd(s.volumeH1Usd)} < ${fmtUsd(cfg.filters.minVolumeH1Usd)}`
+        : null,
+  },
+  {
+    name: "volume_24h",
+    check: (s, { cfg }) =>
+      cfg.filters.minVolumeH24Usd > 0 && (s.volumeH24Usd ?? 0) < cfg.filters.minVolumeH24Usd
+        ? `24h volume ${fmtUsd(s.volumeH24Usd ?? 0)} < ${fmtUsd(cfg.filters.minVolumeH24Usd)}`
         : null,
   },
   {
@@ -127,6 +147,18 @@ export const ENTRY_RULES: EntryRule[] = [
       s.priceChangeM5Pct !== null && s.priceChangeM5Pct > cfg.filters.maxPriceChangeM5Pct
         ? `5m change +${s.priceChangeM5Pct.toFixed(0)}% (chasing)`
         : null,
+  },
+  {
+    name: "trend_1h",
+    check: (s, { cfg }) => {
+      const { minPriceChangeH1Pct: lo, maxPriceChangeH1Pct: hi } = cfg.filters;
+      if (lo === null && hi === null) return null;
+      const c = s.priceChangeH1Pct;
+      if (c === null) return "no 1h price change";
+      if (lo !== null && c < lo) return `1h change ${c.toFixed(1)}% < +${lo}% (no uptrend)`;
+      if (hi !== null && c > hi) return `1h change +${c.toFixed(0)}% > +${hi}% (parabolic)`;
+      return null;
+    },
   },
   {
     name: "not_dumping",

@@ -11,6 +11,7 @@ export interface MarketSnapshot {
   fdvUsd: number | null;
   volumeH1Usd: number;
   volumeM5Usd: number;
+  volumeH24Usd?: number; // 24h volume, when the source provides it
   txnsH1: { buys: number; sells: number };
   txnsM5: { buys: number; sells: number };
   priceChangeM5Pct: number | null;

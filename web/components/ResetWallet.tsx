@@ -3,6 +3,7 @@
 import { useEffect, useState } from "react";
 import { API_URL, DEMO } from "@/lib/config";
 import { usd } from "@/lib/format";
+import { LANES, type Lane, useLane } from "@/lib/lane";
 import { Panel } from "./ui";
 
 // Reset the paper wallet to a new starting amount. The site is public, so this
@@ -13,6 +14,10 @@ import { Panel } from "./ui";
 const TOKEN_KEY = "solsnyper.adminToken";
 
 export function ResetWallet() {
+  const { lane } = useLane();
+  const [target, setTarget] = useState<Lane>(lane);
+  useEffect(() => setTarget(lane), [lane]);
+  const targetLabel = LANES.find((l) => l.id === target)?.label ?? target;
   const [open, setOpen] = useState(false);
   const [amount, setAmount] = useState("10000");
   const [token, setToken] = useState("");
@@ -46,11 +51,11 @@ export function ResetWallet() {
       const res = await fetch(`${API_URL}/api/reset`, {
         method: "POST",
         headers: { authorization: `Bearer ${token.trim()}`, "content-type": "application/json" },
-        body: JSON.stringify({ startingEquity: n }),
+        body: JSON.stringify({ lane: target, startingEquity: n }),
       });
       const body = (await res.json().catch(() => ({}))) as { error?: string; startingEquity?: number };
       if (!res.ok) throw new Error(body.error ?? `HTTP ${res.status}`);
-      setResult({ ok: true, text: `Wallet reset to ${usd(body.startingEquity ?? n, 0)}. Tracking continues; the first tick runs within a few seconds.` });
+      setResult({ ok: true, text: `${targetLabel} wallet reset to ${usd(body.startingEquity ?? n, 0)}. Tracking continues; the first tick runs within a few seconds.` });
       setConfirm("");
       setOpen(false);
     } catch (e) {
@@ -79,9 +84,24 @@ export function ResetWallet() {
           }}
         >
           <p className="rounded border border-rose-900/60 bg-rose-950/40 px-3 py-2 text-rose-200 md:col-span-4">
-            This deletes every trade, position, order and chart point and restarts the simulated wallet. <b>It cannot be undone.</b> The bot
-            keeps tracking afterwards. Simulated money only.
+            This deletes every trade, position, order and chart point of the chosen lane and restarts its simulated wallet.{" "}
+            <b>It cannot be undone.</b> The other lane is not touched, and the bot keeps tracking afterwards. Simulated money only.
           </p>
+          <label className="grid gap-1 md:col-span-4">
+            <span className="text-xs text-zinc-500">Lane to reset</span>
+            <span className="flex gap-2">
+              {LANES.map((l) => (
+                <button
+                  key={l.id}
+                  type="button"
+                  onClick={() => setTarget(l.id)}
+                  className={`rounded px-3 py-1 ${target === l.id ? "bg-rose-500/20 text-rose-200 ring-1 ring-rose-500/40" : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"}`}
+                >
+                  {l.label} <span className="text-xs opacity-70">({l.blurb})</span>
+                </button>
+              ))}
+            </span>
+          </label>
           <label className="grid gap-1">
             <span className="text-xs text-zinc-500">Starting amount (USD, 100 – 1,000,000)</span>
             <input
@@ -115,7 +135,7 @@ export function ResetWallet() {
             disabled={!ready}
             className="rounded bg-rose-600 px-3 py-1.5 font-medium text-white enabled:hover:bg-rose-500 disabled:cursor-not-allowed disabled:opacity-40"
           >
-            {busy ? "Resetting…" : DEMO ? "Unavailable in demo" : `Reset to ${amountOk ? usd(n, 0) : "…"}`}
+            {busy ? "Resetting…" : DEMO ? "Unavailable in demo" : `Reset ${targetLabel} to ${amountOk ? usd(n, 0) : "…"}`}
           </button>
         </form>
       )}

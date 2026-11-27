@@ -21,6 +21,7 @@ export async function callRelay(
   if (!Array.isArray(body?.snapshots) || !Array.isArray(body?.discovered)) throw new Error("relay returned an unexpected body");
   return {
     discovered: body.discovered.filter((d): d is DiscoveredMint => typeof d?.mint === "string" && typeof d?.source === "string"),
+    established: (Array.isArray(body.established) ? body.established : []).filter((d): d is DiscoveredMint => typeof d?.mint === "string" && typeof d?.source === "string"),
     snapshots: body.snapshots.filter((s): s is MarketSnapshot => typeof s?.mint === "string" && typeof s?.priceUsd === "number"),
     solPriceUsd: typeof body.solPriceUsd === "number" ? body.solPriceUsd : null,
     errors: Array.isArray(body.errors) ? body.errors.map(String) : [],

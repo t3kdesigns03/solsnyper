@@ -28,8 +28,20 @@ export interface Summary {
     costs: CostSettings;
     costControl?: CostControl;
     filters: { minLiquidityUsd: number; maxLiquidityUsd?: number; minScore?: number; maxAgeMinutes: number };
-    exits: { hardStopPct: number; takeProfitPct: number; maxHoldMinutes: number };
+    exits: { hardStopPct: number; takeProfitPct: number; maxHoldMinutes: number; exitTriggerBasis?: "net" | "price" };
   };
+}
+
+export interface LaneStats {
+  lane: "sniper" | "stable";
+  wallet: Wallet;
+  realizedPnl: number;
+  closedTrades: number;
+  wins: number;
+  costs: CostTotals;
+  openPositions: number;
+  unrealizedPnl: number;
+  exposureUsd: number;
 }
 
 export interface CostTotals {

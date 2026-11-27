@@ -31,6 +31,11 @@ export function CostSettings() {
           </dd>
           <dt className="text-zinc-500">Slippage</dt>
           <dd className="text-zinc-200">price impact size ÷ (liquidity/2 + size), plus {pct(c.extraSlippagePct, 1)} buffer</dd>
+          <dt className="text-zinc-500">Exit triggers</dt>
+          <dd className="text-zinc-200">
+            take-profit {pct(s.config.exits.takeProfitPct, 1)} · stop {pct(s.config.exits.hardStopPct, 1)} · max hold {s.config.exits.maxHoldMinutes}m, measured on{" "}
+            {s.config.exits.exitTriggerBasis === "price" ? "the raw price move" : "net P&L after all costs (hard stop also fires on price)"}
+          </dd>
           <dt className="text-zinc-500">Fill timing</dt>
           <dd className="text-zinc-200">
             {c.fillDelayTicks === 0

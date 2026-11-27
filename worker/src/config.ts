@@ -86,7 +86,12 @@ export const CONFIG = {
   },
 
   filters: {
-    maxAgeMinutes: 60, // only buy pools younger than this ("very new")
+    maxAgeMinutes: 60, // only buy pools younger than this ("very new"). 0 = no maximum
+    minAgeMinutes: 0, // only buy pools at least this old. 0 = no minimum
+    minVolumeH24Usd: 0, // 24h volume floor (steady trading, not a one-hour spike). 0 = off
+    // 1h trend window, in % (null = off). The sniper doesn't use it.
+    minPriceChangeH1Pct: null as number | null,
+    maxPriceChangeH1Pct: null as number | null,
     minLiquidityUsd: 20_000, // skip thin pools (high slippage, easy to rug)
     // Skip brand-new pools with MORE than this: in the first live hours, 4 of 6
     // trades in $80k+ pools were rugs (creator-seeded liquidity that got pulled). 0 = off.
@@ -104,7 +109,12 @@ export const CONFIG = {
   },
 
   exits: {
-    // Triggers compare the observed price with your FILL price (after slippage).
+    // What take-profit / stop / give-back compare against:
+    //   "net":   net P&L after ALL costs (entry costs paid + estimated exit DEX fee,
+    //            gas and slippage) as a share of the cash put in. "+25%" = +25% net.
+    //   "price": the raw price move vs. your fill price.
+    // The hard stop always fires on whichever basis hits first. Used by both lanes.
+    exitTriggerBasis: "net" as "net" | "price",
     hardStopPct: -0.08, // sell if price is 8% below entry
     takeProfitPct: 0.25, // sell if price is 25% above entry
     maxHoldMinutes: 12, // sell anything held this long
@@ -127,3 +137,63 @@ export const CONFIG = {
 };
 
 export type Config = typeof CONFIG;
+
+// ── Lanes ────────────────────────────────────────────────────────────────────
+// Two separately tracked paper wallets run in the same 45s tick, on the same
+// market data and the same cost model:
+//   sniper: brand-new pools (CONFIG above)
+//   stable: established, liquid pools from trending / top-volume feeds
+export type Lane = "sniper" | "stable";
+export const LANES: Lane[] = ["sniper", "stable"];
+
+// Stable lane: everything not overridden here comes from CONFIG.
+export const STABLE_CONFIG: Config = {
+  ...CONFIG,
+  wallet: {
+    ...CONFIG.wallet,
+    startingEquityUsd: 10_000,
+    buySizeUsd: 250, // base trade size
+    maxBuySizeUsd: 500, // up to $500 in deep pools...
+    maxPoolSharePct: 0.002, // ...never above 0.2% of liquidity ($500 needs a $250k pool)
+    maxOpenPositions: 8,
+    maxBuysPerTick: 2,
+  },
+  costControl: {
+    ...CONFIG.costControl,
+    maxRoundTripCostPct: 0.025, // deep pools: a round trip must cost <= 2.5%
+    minEdgeMultiple: 2, // the +8% take-profit must be >= 2x the pool's round trip
+    maxBuysPerHour: 6,
+  },
+  filters: {
+    ...CONFIG.filters,
+    maxAgeMinutes: 0, // no maximum age
+    minAgeMinutes: 120, // pool must be 2h+ old (survived the launch phase)
+    minLiquidityUsd: 150_000,
+    maxLiquidityUsd: 0, // no ceiling: deep is good here
+    minScore: 0, // the score favours brand-new pools; not used for this lane
+    minVolumeH1Usd: 10_000, // still actively traded this hour
+    minVolumeH24Usd: 250_000, // and steadily over the day
+    minTxnsH1: 100,
+    minSellsH1: 20,
+    maxFdvToLiquidity: 30,
+    // Entry signal: uptrend with a small pullback ("buy the dip in a trend").
+    minPriceChangeH1Pct: 2, // 1h trend up at least +2%...
+    maxPriceChangeH1Pct: 40, // ...but not a parabolic spike
+    minPriceChangeM5Pct: -4, // 5m: a pullback of at most -4%...
+    maxPriceChangeM5Pct: 1, // ...and not still ripping up (no chasing)
+    reentryCooldownMinutes: 240,
+  },
+  exits: {
+    ...CONFIG.exits,
+    takeProfitPct: 0.08, // +8%
+    hardStopPct: -0.045, // -4.5%
+    givebackArmAtGainPct: 0.04, // after +4%...
+    givebackFraction: 0.5, // ...exit once half the peak gain is gone
+    maxHoldMinutes: 120, // 2h time stop
+    liquidityCollapseFraction: 0.5,
+  },
+};
+
+export const LANE_CONFIG: Record<Lane, Config> = { sniper: CONFIG, stable: STABLE_CONFIG };
+
+export const isLane = (v: unknown): v is Lane => v === "sniper" || v === "stable";
