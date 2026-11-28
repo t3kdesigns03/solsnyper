@@ -12,8 +12,10 @@ export const CONFIG = {
     // pools it scales up toward maxBuySizeUsd, but never above maxPoolSharePct of
     // the pool's liquidity and only while the round trip stays under
     // costControl.maxRoundTripCostPct. Set maxBuySizeUsd = buySizeUsd for fixed size.
-    buySizeUsd: 100,
-    maxBuySizeUsd: 250,
+    // Sniper size cut to a fixed $25 (2026-11-28): ~26% of brand-new-pool buys get
+    // rugged (-100%), so the lane runs small while the feature store learns.
+    buySizeUsd: 25,
+    maxBuySizeUsd: 25, // = buySizeUsd: fixed size (raise to scale up in deep pools)
     maxPoolSharePct: 0.005, // 0.5% of liquidity: $250 needs a $50k+ pool
     maxOpenPositions: 10, // never hold more than this many tokens at once
     maxBuysPerTick: 3, // at most this many new buys per tick (best scores first)

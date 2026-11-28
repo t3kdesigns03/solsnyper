@@ -23,7 +23,7 @@ describe("cost-aware entry rules", () => {
   });
 
   it("rejects when take-profit is less than minEdgeMultiple x round-trip cost", () => {
-    const cfg = withCC({ minEdgeMultiple: 2 }, { exits: { ...CONFIG.exits, takeProfitPct: 0.04 } });
+    const cfg = withCC({ minEdgeMultiple: 2 }, { exits: { ...CONFIG.exits, takeProfitPct: 0.04 }, wallet: { ...CONFIG.wallet, buySizeUsd: 100, maxBuySizeUsd: 250 } });
     const r = evaluateEntry(snap({ dexId: "raydium", liquidityUsd: 60_000 }), ctx({ cfg }));
     expect(r.rule).toBe("round_trip_cost");
     expect(r.reason).toMatch(/take-profit 4% < 2x round trip cost/);

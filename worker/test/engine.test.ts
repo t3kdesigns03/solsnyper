@@ -40,7 +40,7 @@ describe("runTick end-to-end (SQLite-backed D1 shim)", () => {
     const m1 = { price, liquidityUsd: LIQ, dexId: "raydium", solPriceUsd: SOL };
     // $50k pool: liquidity-aware sizing scales the $100 base up (max 0.5% of the pool, cost cap permitting).
     const size = tradeSizeUsd(snap({ priceUsd: price, liquidityUsd: LIQ }), CONFIG, SOL);
-    expect(size).toBeGreaterThan(CONFIG.wallet.buySizeUsd);
+    expect(size).toBeGreaterThanOrEqual(CONFIG.wallet.buySizeUsd); // fixed $25 today; scales up only if maxBuySizeUsd > buySizeUsd
     expect(size).toBeLessThanOrEqual(LIQ * CONFIG.wallet.maxPoolSharePct);
     const buy = simulateBuy(size, m1, CONFIG.costs);
     let p = q("SELECT * FROM positions WHERE status='open'");

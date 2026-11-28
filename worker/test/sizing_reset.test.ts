@@ -8,26 +8,28 @@ import { makeD1 } from "./d1shim";
 import { T0, snap } from "./fixtures";
 
 const SOL = 72;
+// The sniper runs at a fixed $25 now; these tests exercise the scaling mechanism at $100-$250.
+const SIZED = { ...CONFIG, wallet: { ...CONFIG.wallet, buySizeUsd: 100, maxBuySizeUsd: 250 } };
 
 describe("liquidity-aware sizing", () => {
   it("is the $100 base in pools too shallow to support more", () => {
-    expect(tradeSizeUsd(snap({ liquidityUsd: 20_000 }), CONFIG, SOL)).toBe(100); // 0.5% of $20k = $100
-    expect(tradeSizeUsd(snap({ liquidityUsd: 30_000 }), CONFIG, SOL)).toBe(100); // $150 would cost > 3% here
+    expect(tradeSizeUsd(snap({ liquidityUsd: 20_000 }), SIZED, SOL)).toBe(100); // 0.5% of $20k = $100
+    expect(tradeSizeUsd(snap({ liquidityUsd: 30_000 }), SIZED, SOL)).toBe(100); // $150 would cost > 3% here
   });
 
   it("scales up in deeper pools, never above maxBuySizeUsd or maxPoolSharePct", () => {
     const deep = snap({ dexId: "raydium", liquidityUsd: 200_000 });
-    expect(tradeSizeUsd(deep, CONFIG, SOL)).toBe(250);
+    expect(tradeSizeUsd(deep, SIZED, SOL)).toBe(250);
     for (const liq of [25_000, 45_000, 70_000]) {
       const s = snap({ liquidityUsd: liq });
-      const size = tradeSizeUsd(s, CONFIG, SOL);
+      const size = tradeSizeUsd(s, SIZED, SOL);
       expect(size).toBeLessThanOrEqual(Math.max(100, liq * 0.005));
-      if (size > 100) expect(poolRoundTripCostPct(s, CONFIG, SOL, size)).toBeLessThanOrEqual(CONFIG.costControl.maxRoundTripCostPct);
+      if (size > 100) expect(poolRoundTripCostPct(s, SIZED, SOL, size)).toBeLessThanOrEqual(CONFIG.costControl.maxRoundTripCostPct);
     }
   });
 
   it("steps back down when the bigger size would break the cost cap", () => {
-    const cfg = { ...CONFIG, costControl: { ...CONFIG.costControl, maxRoundTripCostPct: 0.025 } };
+    const cfg = { ...SIZED, costControl: { ...CONFIG.costControl, maxRoundTripCostPct: 0.025 } };
     const s = snap({ dexId: "meteora", liquidityUsd: 60_000 });
     const size = tradeSizeUsd(s, cfg, SOL);
     expect(size).toBeLessThan(250);
