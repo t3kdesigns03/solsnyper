@@ -133,6 +133,15 @@ export const CONFIG = {
     liquidityCollapseFraction: 0.4,
     // Price feed lost for this many consecutive ticks => close at last price.
     maxMissedUpdates: 4,
+    // Glitch guard: if liquidity reads as collapsed but the same reading shows at
+    // least this many trades in the last 5 min (plus volume), keep the last known
+    // liquidity for one tick and accept the collapse only if it repeats. 0 = off.
+    // Both lanes (the stable lane inherits it).
+    liquidityGlitchMinM5Txns: 3,
+    // Treat a missing / $0 liquidity reading as unknown (keep the last known value)
+    // instead of as an emptied pool. Off for the sniper (its $0 readings were real
+    // rugs, all 35 verified); on for the stable lane (see STABLE_CONFIG).
+    zeroLiquidityIsUnknown: false,
   },
 
   // ── Feature store (data for prediction work) ───────────────────────────────
@@ -223,6 +232,9 @@ export const STABLE_CONFIG: Config = {
     givebackFraction: 0.5, // ...exit once half the peak gain is gone
     maxHoldMinutes: 120, // 2h time stop
     liquidityCollapseFraction: 0.5,
+    // DexScreener reports $0 liquidity for many live PumpSwap pools (DOG, NINE: 25-30k
+    // trades/day): those readings caused fake -100% stops. Established pools: $0 = unknown.
+    zeroLiquidityIsUnknown: true,
   },
   data: {
     ...CONFIG.data,

@@ -91,6 +91,7 @@ export function toSnapshot(p: DexPair, now: number): MarketSnapshot | null {
     dexId: p.dexId ?? null,
     priceUsd: num(p.priceUsd),
     liquidityUsd: num(p.liquidity?.usd),
+    liquidityUnknown: !(num(p.liquidity?.usd) > 0),
     fdvUsd: numOrNull(p.fdv ?? p.marketCap),
     volumeH1Usd: num(p.volume?.h1),
     volumeM5Usd: num(p.volume?.m5),

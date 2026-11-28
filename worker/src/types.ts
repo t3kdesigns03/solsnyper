@@ -12,6 +12,9 @@ export interface MarketSnapshot {
   volumeH1Usd: number;
   volumeM5Usd: number;
   volumeH24Usd?: number; // 24h volume, when the source provides it
+  // True when the source gave no usable liquidity (missing or exactly 0). DexScreener
+  // reports $0 for many live PumpSwap pools; GeckoTerminal sometimes has a null reserve.
+  liquidityUnknown?: boolean;
   // Extra features recorded for analysis (optional: not every source has them)
   volumeH6Usd?: number;
   priceChangeH6Pct?: number | null;

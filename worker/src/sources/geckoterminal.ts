@@ -115,6 +115,7 @@ export function geckoToSnapshot(p: GeckoPool, t: GeckoToken, now: number): Marke
     dexId: p.relationships?.dex?.data?.id ?? null,
     priceUsd: poolPrice || num(t.attributes.price_usd),
     liquidityUsd: num(a.reserve_in_usd),
+    liquidityUnknown: !(num(a.reserve_in_usd) > 0),
     fdvUsd: numOrNull(t.attributes.fdv_usd ?? a.fdv_usd ?? a.market_cap_usd),
     volumeH1Usd: num(a.volume_usd?.h1),
     volumeM5Usd: num(a.volume_usd?.m5),

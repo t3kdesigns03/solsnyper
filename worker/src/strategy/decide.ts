@@ -156,7 +156,27 @@ export function planTick(input: TickInput): TickPlan {
     const raw = snapshots.get(pos.mint);
     const lastLiq = pos.current_liquidity ?? pos.entry_liquidity;
     const otherPool = !!raw && !!pos.pair_address && !!raw.pairAddress && raw.pairAddress !== pos.pair_address;
-    const snap = otherPool && raw!.liquidityUsd < lastLiq * 0.5 ? undefined : raw;
+    const pooledRaw = otherPool && raw!.liquidityUsd < lastLiq * 0.5 ? undefined : raw;
+    // Lanes with exits.zeroLiquidityIsUnknown treat a missing / $0 liquidity reading as
+    // "unknown" and keep the last known value (established pools: a sudden $0 is
+    // almost always a feed gap, e.g. DexScreener on PumpSwap). The sniper keeps $0 as a
+    // possible rug, because for brand-new pools it usually is one.
+    const pooled =
+      pooledRaw && (pooledRaw.liquidityUnknown || pooledRaw.liquidityUsd <= 0) && cfg.exits.zeroLiquidityIsUnknown && lastLiq > 0
+        ? { ...pooledRaw, liquidityUsd: lastLiq }
+        : pooledRaw;
+    // Data glitch guard: a feed sometimes reports $0 / near-zero liquidity for a
+    // pool that is plainly still trading (e.g. DexScreener showed DOG at $0
+    // while it had 30k trades/24h). If liquidity collapsed in this reading but
+    // the same reading shows recent trades and volume, keep the last known
+    // liquidity for ONE tick; if the collapse repeats next tick, accept it.
+    // A real pull still triggers, at most one tick later.
+    const minTxns = cfg.exits.liquidityGlitchMinM5Txns;
+    const liquidityGlitch =
+      !!pooled && minTxns > 0 && pos.missed_updates === 0 && lastLiq > 0 &&
+      pooled.liquidityUsd < lastLiq * cfg.exits.liquidityCollapseFraction &&
+      pooled.txnsM5.buys + pooled.txnsM5.sells >= minTxns && pooled.volumeM5Usd > 0;
+    const snap = liquidityGlitch ? { ...pooled!, liquidityUsd: lastLiq } : pooled;
     const price = snap && snap.priceUsd > 0 ? snap.priceUsd : null;
     const lastPrice = price ?? pos.current_price;
     const m = marketFor(pos, snap, lastPrice);
@@ -198,7 +218,8 @@ export function planTick(input: TickInput): TickPlan {
       liquidity: snap ? snap.liquidityUsd : pos.current_liquidity,
       peak: Math.max(pos.peak_price, lastPrice),
       unrealizedPnl: mtm.unrealizedPnl,
-      missedUpdates: price === null ? pos.missed_updates + 1 : 0,
+      // a glitch tick counts as a missed update, so a repeat next tick is accepted
+      missedUpdates: price === null || liquidityGlitch ? pos.missed_updates + 1 : 0,
     });
     stillOpen.push({ pos, m });
   }

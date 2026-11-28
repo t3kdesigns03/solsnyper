@@ -212,3 +212,60 @@ describe("held positions ignore a different, much thinner pool", () => {
     expect(plan(rugged).sells).toHaveLength(1); // exits fill on the same tick
   });
 });
+
+// The one-tick guard matters for lanes that treat $0 as a possible rug (the sniper);
+// the stable lane treats $0 as unknown outright (tested below).
+describe("$0-liquidity glitch guard (sniper)", () => {
+  const live = () => pos({ pair_address: "OurPool", current_liquidity: 170_000, entry_liquidity: 170_000, mint: "Dog11111111111111111111111111111111111111" });
+  const reading = (over: Partial<MarketSnapshot>) =>
+    snap({ mint: live().mint, pairAddress: "OurPool", priceUsd: 1.08, liquidityUsd: 0, txnsM5: { buys: 40, sells: 30 }, volumeM5Usd: 9_000, ...over });
+  const run = async (p: OpenPosition, s: MarketSnapshot, cfg = CONFIG) => {
+    const { planTick } = await import("../src/strategy/decide");
+    return planTick({ now: T0 + 60_000, cfg, cashUsd: 1000, solPriceUsd: SOL, open: [p], pending: [], discovered: [], snapshots: new Map([[p.mint, s]]), recentlyTraded: new Map() });
+  };
+
+  it("ignores a $0 reading once when the same reading shows the pool still trading", async () => {
+    const plan = await run(live(), reading({}));
+    expect(plan.sells).toHaveLength(0);
+    expect(plan.newOrders).toHaveLength(0);
+    expect(plan.updates[0]).toMatchObject({ liquidity: 170_000, missedUpdates: 1 });
+    expect(plan.updates[0].unrealizedPnl).toBeGreaterThan(0); // valued at the real price, not at zero
+  });
+
+  it("accepts the collapse when it repeats on the next tick", async () => {
+    const plan = await run({ ...live(), missed_updates: 1 }, reading({}));
+    expect(plan.sells).toHaveLength(1);
+  });
+
+  it("treats a $0 reading with no recent trades as a real pull right away", async () => {
+    const plan = await run(live(), reading({ txnsM5: { buys: 0, sells: 0 }, volumeM5Usd: 0 }), CONFIG);
+    expect(plan.sells).toHaveLength(1);
+  });
+
+  it("can be switched off", async () => {
+    const off = { ...CONFIG, exits: { ...CONFIG.exits, liquidityGlitchMinM5Txns: 0 } };
+    expect((await run(live(), reading({}), off)).sells).toHaveLength(1);
+  });
+});
+
+describe("$0 liquidity = unknown for established pools (stable lane)", () => {
+  const held = () => pos({ pair_address: "PumpSwapPool", current_liquidity: 223_000, entry_liquidity: 223_000, mint: "Nine1111111111111111111111111111111111111", dex_id: "pumpswap" });
+  // DexScreener on a live PumpSwap pool: liquidity 0, no 5m trades reported
+  const dex0 = () => snap({ mint: held().mint, pairAddress: "PumpSwapPool", dexId: "pumpswap", priceUsd: 1.034, liquidityUsd: 0, liquidityUnknown: true, txnsM5: { buys: 0, sells: 0 }, volumeM5Usd: 0 });
+  const run = async (cfg: typeof CONFIG) => {
+    const { planTick } = await import("../src/strategy/decide");
+    const p = held();
+    return planTick({ now: T0 + 60_000, cfg, cashUsd: 1000, solPriceUsd: SOL, open: [p], pending: [], discovered: [], snapshots: new Map([[p.mint, dex0()]]), recentlyTraded: new Map() });
+  };
+
+  it("stable: keeps the last known liquidity instead of selling into a phantom empty pool", async () => {
+    const plan = await run(STABLE_CONFIG);
+    expect(plan.sells).toHaveLength(0);
+    expect(plan.updates[0]).toMatchObject({ liquidity: 223_000, missedUpdates: 0 });
+    expect(plan.updates[0].unrealizedPnl).toBeGreaterThan(-20); // valued near the real price, not at -100%
+  });
+
+  it("sniper: still treats $0 as a possible rug", async () => {
+    expect((await run(CONFIG)).sells).toHaveLength(1);
+  });
+});

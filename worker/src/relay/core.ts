@@ -55,6 +55,7 @@ export function trimSnapshot(s: MarketSnapshot): MarketSnapshot {
     dexId: s.dexId,
     priceUsd: sig(s.priceUsd),
     liquidityUsd: Math.round(s.liquidityUsd),
+    liquidityUnknown: s.liquidityUnknown || undefined,
     fdvUsd: s.fdvUsd === null ? null : Math.round(s.fdvUsd),
     volumeH1Usd: Math.round(s.volumeH1Usd),
     volumeM5Usd: Math.round(s.volumeM5Usd),
