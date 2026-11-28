@@ -209,6 +209,6 @@ describe("held positions ignore a different, much thinner pool", () => {
     expect(a.newOrders).toHaveLength(0); // no exit from the bogus price
     expect(a.updates[0].missedUpdates).toBe(1);
     const rugged = snap({ mint: p.mint, pairAddress: "OurPool", liquidityUsd: 100, priceUsd: 0.01 });
-    expect(plan(rugged).newOrders[0]).toMatchObject({ side: "sell" });
+    expect(plan(rugged).sells).toHaveLength(1); // exits fill on the same tick
   });
 });

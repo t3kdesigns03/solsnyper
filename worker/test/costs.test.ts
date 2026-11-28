@@ -75,6 +75,8 @@ const position = (over: Partial<OpenPosition> = {}): OpenPosition => ({
   entry_liquidity: 50_000, current_price: 0.001, current_liquidity: 50_000, peak_price: 0.001, missed_updates: 0, dex_id: "raydium", ...over,
 });
 
+const baseInput = (over: Partial<TickInput> = {}): TickInput => base(over);
+
 describe("pending orders (fillDelayTicks = 1)", () => {
   it("a passing candidate becomes an order, not a buy", () => {
     const plan = planTick(base());
@@ -109,7 +111,18 @@ describe("pending orders (fillDelayTicks = 1)", () => {
     expect(plan.waitingOrders).toEqual([{ id: 7, ticksWaited: 1 }]);
   });
 
-  it("an exit becomes a sell order and fills next tick below the new price", () => {
+  it("default: an exit sells on the same tick at the observed price minus the latency buffer", () => {
+    const dropped = snap({ priceUsd: 0.0009 }); // -10% => hard stop
+    const plan = planTick(base({ open: [position()], discovered: [], snapshots: new Map([[mint, dropped]]) }));
+    expect(plan.newOrders).toHaveLength(0);
+    expect(plan.sells).toHaveLength(1);
+    expect(plan.sells[0]).toMatchObject({ rule: "hard_stop", signalPrice: 0.0009 });
+    expect(plan.sells[0].fill.fillPrice).toBeLessThan(0.0009 * (1 - C.exitLatencySlippagePct));
+  });
+
+  it("exitFillDelayTicks = 1: an exit becomes a sell order and fills next tick below the new price", () => {
+    const delayed = { ...CONFIG, costs: { ...C, exitFillDelayTicks: 1 } };
+    const base = (over: Partial<TickInput> = {}): TickInput => baseInput({ cfg: delayed, ...over });
     const dropped = snap({ priceUsd: 0.0009 }); // -10% => hard stop
     const p1 = planTick(base({ open: [position()], discovered: [], snapshots: new Map([[mint, dropped]]) }));
     expect(p1.sells).toHaveLength(0);

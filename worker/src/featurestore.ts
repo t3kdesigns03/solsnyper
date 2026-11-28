@@ -1,4 +1,4 @@
-import type { Config, Lane } from "./config";
+import { type Config, type Lane, LANE_CONFIG, LANES } from "./config";
 import type { RiskSummary } from "./sources/rugcheck";
 import type { CandidateRow } from "./strategy/decide";
 import type { MarketSnapshot } from "./types";
@@ -9,23 +9,37 @@ import type { MarketSnapshot } from "./types";
 // trading; it only collects data for analysis (worker/scripts/analyze.ts).
 
 export interface SamplingPlan {
-  isSample: boolean;
+  isSample: boolean; // any lane samples this tick
+  laneSample: Partial<Record<Lane, boolean>>; // which lanes record a sample this tick
   watch: { lane: Lane; mint: string }[];
   riskMints: string[];
 }
 
-/** Decide whether this tick records a sample, which watchlist coins to price, and which mints need a risk lookup. */
-export async function planSampling(db: D1Database, cfg: Config, now: number): Promise<SamplingPlan> {
+/**
+ * Decide which lanes record a sample this tick (each lane has its own cadence:
+ * data.sampleEveryMinutes, 0 = every tick), which watchlist coins to price,
+ * and which mints need a risk lookup.
+ */
+export async function planSampling(db: D1Database, cfg: Config, now: number, lanes: Partial<Record<Lane, Config>> = LANE_CONFIG): Promise<SamplingPlan> {
   const d = cfg.data;
-  if (!d.enabled) return { isSample: false, watch: [], riskMints: [] };
-  const last = (await db.prepare("SELECT MAX(t) AS t FROM candidate_snapshots").first<{ t: number | null }>())?.t ?? 0;
-  // 5s slack so a 3-minute cadence isn't skipped by tick jitter
-  const isSample = now - last >= d.sampleEveryMinutes * 60_000 - 5_000;
+  if (!d.enabled) return { isSample: false, laneSample: {}, watch: [], riskMints: [] };
+  const lastByLane = new Map(
+    (await db.prepare("SELECT lane, MAX(t) AS t FROM candidate_snapshots GROUP BY lane").all<{ lane: Lane; t: number }>()).results.map((r) => [r.lane, r.t]),
+  );
+  const laneSample: Partial<Record<Lane, boolean>> = {};
+  for (const l of LANES) {
+    const lc = lanes[l];
+    if (!lc || !lc.data.enabled) continue;
+    // 5s slack so a 3-minute cadence isn't skipped by tick jitter
+    laneSample[l] = now - (lastByLane.get(l) ?? 0) >= lc.data.sampleEveryMinutes * 60_000 - 5_000;
+  }
+  const sampling = LANES.filter((l) => laneSample[l]);
+  const isSample = sampling.length > 0;
   const watch = isSample
     ? (
         await db
-          .prepare("SELECT lane, mint FROM watchlist WHERE until > ? ORDER BY first_seen DESC LIMIT ?")
-          .bind(now, d.maxWatchlist)
+          .prepare(`SELECT lane, mint FROM watchlist WHERE until > ? AND lane IN (${sampling.map(() => "?").join(",")}) ORDER BY first_seen DESC LIMIT ?`)
+          .bind(now, ...sampling, d.maxWatchlist)
           .all<{ lane: Lane; mint: string }>()
       ).results
     : [];
@@ -40,7 +54,7 @@ export async function planSampling(db: D1Database, cfg: Config, now: number): Pr
             .all<{ mint: string }>()
         ).results.map((r) => r.mint)
       : [];
-  return { isSample, watch, riskMints };
+  return { isSample, laneSample, watch, riskMints };
 }
 
 /** Does a lane want to track this candidate? */
@@ -88,6 +102,7 @@ export function buildFeatureWrites(
   if (!plan.isSample) return w;
 
   for (const { lane, cfg, candidates } of lanes) {
+    if (!plan.laneSample[lane]) continue; // this lane's cadence says not this tick
     const recorded = new Set<string>();
     for (const c of candidates) {
       if (!c.snap || !shouldTrack(c.snap, cfg) || recorded.has(c.mint)) continue;

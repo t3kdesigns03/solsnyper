@@ -97,7 +97,12 @@ const pctMove = (fill: number, signal: number) => {
 export function planTick(input: TickInput): TickPlan {
   const { now, cfg, snapshots } = input;
   const costs = cfg.costs;
-  const delay = Math.max(0, Math.floor(costs.fillDelayTicks));
+  const delay = Math.max(0, Math.floor(costs.fillDelayTicks)); // buys
+  // Exits: a real bot sends the sell seconds after seeing the price, so by
+  // default exits fill on the tick they're decided, at the observed price plus
+  // a latency slippage buffer. exitFillDelayTicks >= 1 restores delayed exits.
+  const exitDelay = Math.max(0, Math.floor(costs.exitFillDelayTicks));
+  const exitCosts = exitDelay === 0 ? { ...costs, extraSlippagePct: costs.extraSlippagePct + costs.exitLatencySlippagePct } : costs;
   const sol = input.solPriceUsd > 0 ? input.solPriceUsd : costs.fallbackSolPriceUsd;
   const pending = input.pending ?? [];
   const due = (o: PendingOrder) => o.ticks_waited + 1 >= delay;
@@ -122,7 +127,7 @@ export function planTick(input: TickInput): TickPlan {
   });
 
   const sell = (pos: OpenPosition, m: MarketAtFill, rule: string, reason: string, signalPrice: number) => {
-    const fill = simulateSell(pos, m, costs);
+    const fill = simulateSell(pos, m, exitCosts);
     cash += fill.cashIn;
     sells.push({ pos, rule, reason, fill, signalPrice });
     decisions.push({
@@ -171,9 +176,9 @@ export function planTick(input: TickInput): TickPlan {
     } else {
       // Net P&L (after every cost) if sold at a given price now, as a share of the cash put in.
       const basis = pos.size_usd + pos.entry_fee_usd;
-      const netAt = (px: number) => markToMarket(pos, { ...m, price: px }, costs).unrealizedPnl / basis;
+      const netAt = (px: number) => markToMarket(pos, { ...m, price: px }, exitCosts).unrealizedPnl / basis;
       const exit = evaluateExit(pos, { now, cfg, price, liquidity: snap ? snap.liquidityUsd : null, netAt });
-      if (exit && delay === 0) {
+      if (exit && exitDelay === 0) {
         sell(pos, m, exit.rule, exit.reason, lastPrice);
         continue;
       }
@@ -186,7 +191,7 @@ export function planTick(input: TickInput): TickPlan {
       }
     }
 
-    const mtm = markToMarket(pos, m, costs);
+    const mtm = markToMarket(pos, m, exitCosts);
     updates.push({
       id: pos.id,
       price: lastPrice,
@@ -329,10 +334,10 @@ export function planTick(input: TickInput): TickPlan {
 
   // 4) Equity = cash + open positions valued net of estimated exit costs.
   let equity = cash;
-  for (const o of stillOpen) equity += markToMarket(o.pos, o.m, costs).valueUsd;
+  for (const o of stillOpen) equity += markToMarket(o.pos, o.m, exitCosts).valueUsd;
   for (const b of buys) {
     const m: MarketAtFill = { price: b.snap.priceUsd, liquidityUsd: b.snap.liquidityUsd, dexId: b.snap.dexId, solPriceUsd: sol };
-    equity += markToMarket({ quantity: b.fill.quantity, size_usd: b.sizeUsd, entry_fee_usd: b.fill.cashOut - b.sizeUsd }, m, costs).valueUsd;
+    equity += markToMarket({ quantity: b.fill.quantity, size_usd: b.sizeUsd, entry_fee_usd: b.fill.cashOut - b.sizeUsd }, m, exitCosts).valueUsd;
   }
 
   return {

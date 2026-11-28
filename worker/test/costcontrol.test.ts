@@ -48,7 +48,8 @@ describe("cost-aware entry rules", () => {
     const on = withCC({ symbolCooldownMinutes: 120 });
     expect(evaluateEntry(snap(), ctx({ recentSymbols: recent, cfg: on })).rule).toBe("symbol_cooldown");
     expect(evaluateEntry(snap(), ctx({ recentSymbols: new Map([["GOOD", T0 - 130 * 60_000]]), cfg: on })).passed).toBe(true);
-    expect(evaluateEntry(snap(), ctx({ recentSymbols: recent })).passed).toBe(true); // off by default
+    expect(evaluateEntry(snap(), ctx({ recentSymbols: recent })).rule).toBe("symbol_cooldown"); // on by default for the sniper (120m)
+    expect(evaluateEntry(snap(), ctx({ recentSymbols: recent, cfg: withCC({ symbolCooldownMinutes: 0 }) })).passed).toBe(true);
   });
 });
 

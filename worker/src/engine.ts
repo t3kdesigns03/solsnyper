@@ -244,7 +244,7 @@ export async function runTick(
   );
 
   // --- feature store: is this a sample tick, which tracked coins to price, which need a risk lookup
-  const sampling = await planSampling(db, lanes.sniper ?? CONFIG, now);
+  const sampling = await planSampling(db, lanes.sniper ?? CONFIG, now, lanes);
 
   // --- ONE market fetch for all lanes (mints with a pending buy count as held, so they get priced)
   const held = [

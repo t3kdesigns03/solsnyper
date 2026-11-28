@@ -55,6 +55,13 @@ export const CONFIG = {
     // so the bot can't buy at exactly the price that triggered the buy.
     // 1 = next tick (~45s later, realistic for a bot polling APIs). 0 = instant.
     fillDelayTicks: 1,
+    // Exits fill on the tick they're decided (0) at the observed price, with an
+    // extra latency buffer for the few seconds a real sell takes and for
+    // front-running. Hard-stop analysis (2026-11-28): with a one-tick exit delay,
+    // 7 take-profits became total losses because the pool was pulled during the
+    // 45s wait. Set exitFillDelayTicks: 1 for the old, harsher behaviour.
+    exitFillDelayTicks: 0,
+    exitLatencySlippagePct: 0.02,
   },
 
   // ── Cost control: strategy rules that avoid expensive or pointless trades ──
@@ -80,9 +87,9 @@ export const CONFIG = {
     maxBuysPerHour: 12,
     // Skip a new token whose SYMBOL we bought in the last N minutes (a different
     // mint). Rugged coins are often relaunched under the same name minutes later.
-    // 0 = off (default): on the first live hour it removed as many winners as
-    // rugs. Try 120 to test it. The per-mint cooldown is filters.reentryCooldownMinutes.
-    symbolCooldownMinutes: 0,
+    // Turned on (2026-11-28): JIMMY rugged 3x and WLFI 2x under new mints.
+    // 0 = off. The per-mint cooldown is filters.reentryCooldownMinutes.
+    symbolCooldownMinutes: 120,
   },
 
   filters: {
@@ -135,7 +142,9 @@ export const CONFIG = {
   // Rows/day ~= tracked coins per sample x (1440 / sampleEveryMinutes).
   data: {
     enabled: true,
-    sampleEveryMinutes: 3,
+    // Sniper coins move (and get rugged) within minutes, so they're recorded every
+    // tick (0) to make entry-timing replays possible. The stable lane overrides to 3.
+    sampleEveryMinutes: 0,
     retentionDays: 7, // prune snapshots older than this
     maxWatchlist: 150, // cap on coins priced purely for tracking, per sample
     trackMinLiquidityUsd: 10_000, // sniper: track young pools with at least this
@@ -181,6 +190,7 @@ export const STABLE_CONFIG: Config = {
   costControl: {
     ...CONFIG.costControl,
     maxRoundTripCostPct: 0.025, // deep pools: a round trip must cost <= 2.5%
+    symbolCooldownMinutes: 0, // relaunch-rug rule is for brand-new coins only
     minEdgeMultiple: 2, // the +8% take-profit must be >= 2x the pool's round trip
     maxBuysPerHour: 6,
   },
@@ -216,6 +226,7 @@ export const STABLE_CONFIG: Config = {
   },
   data: {
     ...CONFIG.data,
+    sampleEveryMinutes: 3,
     trackMinLiquidityUsd: 100_000, // the trending / top-volume set
     trackMaxAgeMinutes: 0,
     trackMinutes: 250, // +4h outcomes

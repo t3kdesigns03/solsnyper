@@ -56,21 +56,22 @@ describe("runTick end-to-end (SQLite-backed D1 shim)", () => {
     expect(q("SELECT cash_usd FROM wallet").cash_usd).toBeCloseTo(1000 - buy.cashOut);
     expect(q("SELECT COUNT(*) n FROM pending_orders").n).toBe(0);
 
-    // Tick 2: +30% over fill => take-profit signal -> pending sell order.
-    price = buy.fillPrice * 1.3;
+    // Tick 2: +35% over fill => take-profit (+25% net after costs incl. the latency
+    // buffer). Exits fill on the same tick, at the
+    // observed price plus the latency slippage buffer (no pending sell order).
+    price = buy.fillPrice * 1.35;
     await runTick(env, T0 + 90_000, sources);
-    expect(q("SELECT status FROM positions").status).toBe("open");
-    expect(q("SELECT side FROM pending_orders").side).toBe("sell");
-
-    // Tick 3: sell fills at the new (lower) price.
-    const signal = price;
-    price = signal * 0.97;
-    await runTick(env, T0 + 135_000, sources);
+    expect(q("SELECT COUNT(*) n FROM pending_orders").n).toBe(0);
     p = q("SELECT * FROM positions");
     expect(p.status).toBe("closed");
     expect(p.close_reason).toMatch(/^take_profit/);
-    expect(p.exit_signal_price).toBeCloseTo(signal, 12);
-    const sold = simulateSell({ quantity: buy.quantity, size_usd: size, entry_fee_usd: buy.cashOut - size }, { ...m1, price }, CONFIG.costs);
+    expect(p.exit_signal_price).toBeCloseTo(price, 12);
+    const exitCosts = { ...CONFIG.costs, extraSlippagePct: CONFIG.costs.extraSlippagePct + CONFIG.costs.exitLatencySlippagePct };
+    const sold = simulateSell({ quantity: buy.quantity, size_usd: size, entry_fee_usd: buy.cashOut - size }, { ...m1, price }, exitCosts);
+    expect(sold.fillPrice).toBeLessThan(price * (1 - CONFIG.costs.exitLatencySlippagePct)); // latency buffer applied
+
+    // Tick 3: nothing left to do.
+    await runTick(env, T0 + 135_000, sources);
     expect(p.realized_pnl).toBeCloseTo(sold.pnlUsd, 9);
     const t = q("SELECT * FROM trades WHERE side='sell'");
     expect(t.pnl_usd).toBeCloseTo(sold.pnlUsd, 9);
